@@ -1,24 +1,49 @@
 # envkit
 
-`envkit` keeps each project's `.env` outside its worktrees in `~/.envkit`.
-That directory is a local Git repository, so changes have a small audit log.
-This helps keep secrets out of agent transcripts, repository diffs, and accidental commits.
+Per-project .env vault with comments, git audit log, worktree-aware, agent-safe, with a lazydocker-style TUI.
+
+![envkit tui](docs/tui.png)
+
+[![Release](https://img.shields.io/github/v/release/NarayanaSabari/envkit)](https://github.com/NarayanaSabari/envkit/releases)
+[![Go version](https://img.shields.io/github/go-mod/go-version/NarayanaSabari/envkit)](go.mod)
+[![License](https://img.shields.io/github/license/NarayanaSabari/envkit)](LICENSE)
+
+## Why
+
+- Secrets leak into coding-agent transcripts and cloud logs.
+- `.env` files scattered across worktrees drift.
+- There is no history of who changed what.
+- There is no place for a comment saying what a key is for.
+
+`envkit` fixes all four.
 
 ## Install
 
-Install the current release with Go:
+### Homebrew
+
+```sh
+brew install NarayanaSabari/tap/envkit
+```
+
+### Go
 
 ```sh
 go install github.com/NarayanaSabari/envkit@latest
 ```
 
-Or build and install from a checkout:
+### Prebuilt binaries
+
+Download a Darwin or Linux binary from [Releases](https://github.com/NarayanaSabari/envkit/releases).
+
+### Source
 
 ```sh
+git clone https://github.com/NarayanaSabari/envkit.git
+cd envkit
 make install
 ```
 
-`make install` puts the single Go binary in `~/.local/bin/envkit`.
+`make install` puts the binary in `~/.local/bin/envkit`.
 
 ## Quick start
 
@@ -30,35 +55,26 @@ envkit ls
 envkit run -- ./script-that-needs-the-token
 ```
 
-`envkit` stores the file at `${ENVKIT_HOME:-$HOME/.envkit}/<project>/.env`.
-A project name is resolved from `ENVKIT_PROJECT`, `git config envkit.project`, the origin owner and repository, then the worktree directory.
-All worktrees with the same origin therefore share one env file.
-`init` creates the home directory with mode 700 and initializes its Git repository.
+## How it works
 
+`envkit` stores each project file at `${ENVKIT_HOME:-$HOME/.envkit}/<project>/.env`.
+The storage home is a local Git repository initialized by `envkit init` with mode 700.
+
+A project name resolves in this order:
+
+1. `ENVKIT_PROJECT`
+2. `git config envkit.project`
+3. The Git origin owner and repository
+4. The worktree directory
+
+Worktrees with the same origin share one `.env` file.
+Every mutation creates a local Git audit commit, and `envkit log [KEY]` shows its history.
 Values are written as-is, with no quoting or shell expansion.
-Pipe values with spaces or shell syntax directly to `envkit set`.
+Pipe values containing spaces or shell syntax directly to `envkit set`.
 
-## Verbs
+## Using with coding agents
 
-| Verb | Description |
-| --- | --- |
-| `init` | Initialize storage and print the project env path. |
-| `path` | Create if needed, then print the `.env` path. |
-| `project` | Print the resolved project name. |
-| `set KEY [-m COMMENT]` | Read a secret from stdin or a hidden terminal prompt and save it. |
-| `unset KEY` | Remove a key and its directly preceding comments. |
-| `comment KEY TEXT` | Set the comment directly above an existing key. |
-| `ls` | List keys and comments, never values. |
-| `get KEY` | Print one value. |
-| `run [--] CMD...` | Execute a command with the project env loaded. |
-| `export` | Print shell `export` statements. |
-| `log [KEY]` | Show project history, or pickaxe history for one key. |
-| `diff` | Show uncommitted changes in the env storage repository. |
-| `edit` | Edit with `$EDITOR`, then commit changes. |
-| `list` | List all saved projects. |
-| `tui` | Open the interactive terminal interface. |
-
-For agents and scripts, prefer a command boundary instead of printing secrets:
+Prefer a command boundary so a secret never needs to be printed:
 
 ```sh
 envkit run -- your-command
@@ -69,6 +85,45 @@ When a process must load the file itself:
 ```sh
 set -a; . "$(envkit path)"; set +a
 ```
+
+Use `envkit ls` to show names and comments without values.
+Have the user run `envkit set KEY` in their own terminal so the value never enters the chat.
+
+Paste this into `AGENTS.md` or `CLAUDE.md`:
+
+```md
+## Secrets
+
+- Keep secrets in envkit, not in repository `.env` files or chat messages.
+- Use `envkit run -- command` when possible.
+- If a process needs the file, run `set -a; . "$(envkit path)"; set +a`.
+- Use `envkit ls` only for key names and comments.
+- Never run `envkit get` or `envkit export`.
+- Ask the user to run `envkit set KEY` in their own terminal for new values.
+```
+
+A pre-tool hook can block `envkit get`, `envkit export`, and direct `.env` reads to enforce this pattern before a command runs.
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `init` | Initialize storage and print the project env path. |
+| `path` | Create storage if needed, then print the `.env` path. |
+| `project` | Print the resolved project name. |
+| `version` | Print the envkit version. |
+| `set KEY [-m COMMENT]` | Read a secret from stdin or a hidden terminal prompt and save it. |
+| `unset KEY` | Remove a key and its directly preceding comments. |
+| `comment KEY TEXT` | Set the comment directly above an existing key. |
+| `ls` | List keys and comments, never values. |
+| `get KEY` | Print one value. |
+| `run [--] COMMAND...` | Execute a command with the project env loaded. |
+| `export` | Print shell `export` statements. |
+| `log [KEY]` | Show project history, or pickaxe history for one key. |
+| `diff` | Show uncommitted changes in the env storage repository. |
+| `edit` | Edit with `$EDITOR`, then commit changes. |
+| `list` | List all saved projects. |
+| `tui` | Open the interactive terminal interface. |
 
 ## TUI
 
@@ -92,7 +147,24 @@ Every mutation uses the same local Git audit log as the CLI.
 | `esc` | Cancel an inline input. |
 | `q`, `ctrl-c` | Quit. |
 
-## Secret output warning
+## Compared to
 
-`ls`, logs, and normal mutation commands do not print values.
+| Tool | Comments | Audit log | Worktree-aware | Offline | TUI |
+| --- | --- | --- | --- | --- | --- |
+| envkit | Yes | Yes | Yes | Yes | Yes |
+| [envchain](https://github.com/sorah/envchain) | No | No | No | Yes | No |
+| [dotenvx](https://dotenvx.com/) | No | No | No | Yes | No |
+| [1Password CLI](https://developer.1password.com/docs/cli/) | Yes | Yes | No | No | No |
+| [Doppler](https://www.doppler.com/) | Yes | Yes | No | No | No |
+
+## Security notes
+
+Secrets are stored as plain text at rest.
+`envkit` relies on FileVault and storage permissions of mode 700 to protect local files.
 `get` and `export` intentionally print secrets, so use them only in a safe terminal context.
+Sync the storage repository to a private remote if you want an off-machine backup.
+Encryption is out of scope for now.
+
+## License
+
+[MIT](LICENSE)
