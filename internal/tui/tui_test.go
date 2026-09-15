@@ -209,9 +209,28 @@ func TestRevealExpandsValueColumnAndShowsDetailValue(t *testing.T) {
 			if !strings.Contains(view, value) {
 				t.Fatalf("revealed value is truncated or missing\n%s", view)
 			}
+			var row string
+			for _, line := range strings.Split(view, "\n") {
+				if strings.Contains(line, "VELVET_TOKEN") && strings.Contains(line, value) {
+					row = line
+					break
+				}
+			}
+			if row == "" {
+				t.Fatalf("row for VELVET_TOKEN not found\n%s", view)
+			}
+			if !strings.Contains(row, value+"  "+comment) {
+				t.Fatalf("revealed value is not followed by a two-space gutter before the comment: %q", row)
+			}
 			detail := ansi.Strip(model.detail(model.contentWidth(size.Width-model.projectsWidth(size.Width)), size.Height))
 			if !strings.Contains(detail, value) {
 				t.Fatalf("Detail does not contain the complete revealed value\n%s", detail)
+			}
+			if !strings.Contains(detail, "set VELVET_TOKEN") {
+				t.Fatalf("Detail does not contain the history subject\n%s", detail)
+			}
+			if strings.Contains(detail, s.Project+": set VELVET_TOKEN") {
+				t.Fatalf("Detail history subject still contains the project prefix\n%s", detail)
 			}
 
 			updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})

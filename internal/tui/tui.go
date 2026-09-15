@@ -492,7 +492,7 @@ func (m Model) keyTable(width, height int) string {
 	if entry, ok := m.selectedKey(); ok && m.reveal {
 		// Keep the value column wide enough to show a revealed secret whenever
 		// practical, but leave room for the surrounding table columns.
-		valueWidth = max(valueWidth, min(lipgloss.Width(entry.Value), width*3/5))
+		valueWidth = max(valueWidth, min(lipgloss.Width(entry.Value)+2, width*3/5))
 	}
 	updatedWidth++
 	const minimumCommentWidth = len("COMMENT")
@@ -546,7 +546,7 @@ func (m Model) keyTable(width, height int) string {
 		}
 		lines = append(lines,
 			keyStyle.Render(padRight(entry.Key, keyWidth))+
-				valueStyle.Render(padRight(value, valueWidth))+
+				valueStyle.Render(padRight(truncate(value, max(1, valueWidth-2)), valueWidth))+
 				commentStyle.Render(padRight(strings.ReplaceAll(entry.Comment, "\n", " "), commentWidth))+
 				updatedStyle.Render(padLeft(updated[i], updatedWidth)),
 		)
@@ -611,6 +611,7 @@ func (m Model) historyLine(line string, width int) string {
 	if !found {
 		return muted(hash + "  " + rest)
 	}
+	subject = strings.TrimPrefix(subject, m.Store.Project+": ")
 	dim := lipgloss.NewStyle().Foreground(mutedColor)
 	return dim.Render(hash) + "  " + dim.Render(when) + "  " + lipgloss.NewStyle().Foreground(normalColor).Render(subject)
 }
