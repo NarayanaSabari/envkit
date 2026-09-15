@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# envkit: keep project .env files outside worktrees, with a small git audit log.
+
+set -e
+
+HOME_DIR="${ENVKIT_HOME:-$HOME/.envkit}"
+
+usage() {
+  cat <<'EOF'
+usage: envkit <verb> [arguments]
+
+init | path | project | set KEY [-m COMMENT] | unset KEY | comment KEY TEXT
+ls | get KEY | run [--] COMMAND... | export | log [KEY] | diff | edit | list | tui
+EOF
+}
+
+project_name() {
+  if [ -n "${ENVKIT_PROJECT:-}" ]; then
+    printf '%s\n' "$ENVKIT_PROJECT"
+    return
+  fi
+  local configured url top
+  configured=$(git config --get envkit.project 2>/dev/null || true)
+  if [ -n "$configured" ]; then
+    printf '%s\n' "$configured"
+    return
+  fi
+  url=$(git config --get remote.origin.url 2>/dev/null || true)
+  if [ -n "$url" ]; then
+    url=${url%.git}
+    # The last two path components work for HTTPS, ssh://, scp syntax, and aliases.
+    printf '%s\n' "$url" | sed -E 's#.*[:/]([^/:]+)/([^/]+)$#\1__\2#'
+    return
+  fi
+  top=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -n "$top" ]; then
+    basename "$top"
+  else
+    basename "$PWD"
+  fi
+}
+
+ensure_home() {
+  if [ ! -d "$HOME_DIR" ]; then
+    mkdir -p "$HOME_DIR"
+    chmod 700 "$HOME_DIR"
+  fi
+  if [ ! -d "$HOME_DIR/.git" ]; then
+    git -C "$HOME_DIR" init -q
+  fi
+}
+
+project_dir() {
+  printf '%s/%s\n' "$HOME_DIR" "$(project_name)"
+}
+
+env_path() {
+  printf '%s/.env\n' "$(project_dir)"
+}
+
+ensure_env() {
+  ensure_home
+  mkdir -p "$(project_dir)"
+  touch "$(env_path)"
+}
+
+valid_key() {
+  if [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    return 0
+  fi
+  echo "envkit: invalid key: $1" >&2
+  exit 2
+}
+
+value_for() {
+  awk -F= -v key="$1" '$0 ~ "^" key "=" { sub("^[^=]*=", ""); print; exit }' "$(env_path)"
+}
+
+write_key() {
+  local key=$1 value=$2 comment=$3 use_comment=$4 file tmp
+  file=$(env_path)
+  tmp="$file.tmp.$$"
+  awk -v key="$key" -v value="$value" -v comment="$comment" -v use_comment="$use_comment" '
+    /^#/ { pending = pending $0 "\n"; next }
+    $0 ~ ("^" key "=") {
+      if (!done) {
+        if (use_comment == "yes") print "# " comment
+        else printf "%s", pending
+        print key "=" value
+        done = 1
+      }
+      pending = ""
+      next
+    }
+    { printf "%s", pending; pending = ""; print }
+    END {
+      printf "%s", pending
+      if (!done) {
+        if (use_comment == "yes") print "# " comment
+        print key "=" value
+      }
+    }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+remove_key() {
+  local key=$1 file tmp
+  file=$(env_path)
+  tmp="$file.tmp.$$"
+  awk -v key="$key" '
+    /^#/ { pending = pending $0 "\n"; next }
+    $0 ~ ("^" key "=") { pending = ""; next }
+    { printf "%s", pending; pending = ""; print }
+    END { printf "%s", pending }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+commit_change() {
+  local message=$1
+  git -C "$HOME_DIR" add "$(project_name)/.env"
+  if ! git -C "$HOME_DIR" diff --cached --quiet; then
+    git -C "$HOME_DIR" commit -q -m "$message"
+  fi
+}
+
+cmd_set() {
+  local key=${1:-} comment='' use_comment=no value
+  [ -n "$key" ] || { usage; exit 2; }
+  valid_key "$key"
+  shift
+  if [ "${1:-}" = "-m" ]; then
+    [ $# -ge 2 ] || { echo "envkit: -m needs a comment" >&2; exit 2; }
+    comment=$2
+    use_comment=yes
+    shift 2
+  fi
+  [ $# -eq 0 ] || { echo "envkit: value is read from stdin, never arguments" >&2; exit 2; }
+  ensure_env
+  if [ -t 0 ]; then
+    printf '%s' "value for $key: " >&2
+    IFS= read -r -s value
+    printf '\n' >&2
+  else
+    value=$(cat)
+  fi
+  write_key "$key" "$value" "$comment" "$use_comment"
+  commit_change "$(project_name): set $key"
+}
+
+cmd_comment() {
+  local key=${1:-} text=${2:-}
+  [ $# -eq 2 ] || { usage; exit 2; }
+  valid_key "$key"
+  ensure_env
+  local value
+  value=$(value_for "$key")
+  if ! grep -q "^$key=" "$(env_path)"; then
+    echo "envkit: no such key: $key" >&2
+    exit 1
+  fi
+  write_key "$key" "$value" "$text" yes
+  commit_change "$(project_name): comment $key"
+}
+
+cmd_ls() {
+  ensure_env
+  awk '
+    /^#/ { comment = substr($0, 3); next }
+    /^[A-Za-z_][A-Za-z0-9_]*=/ {
+      key = $0; sub(/=.*/, "", key)
+      if (comment != "") print key "  # " comment; else print key
+      comment = ""; next
+    }
+    { comment = "" }
+  ' "$(env_path)"
+}
+
+cmd_export() {
+  ensure_env
+  awk '/^[A-Za-z_][A-Za-z0-9_]*=/ { print "export " $0 }' "$(env_path)"
+}
+
+cmd_tui() {
+  command -v gum >/dev/null 2>&1 || { echo "envkit: tui requires gum" >&2; exit 1; }
+  local selected action key text command_line
+  selected=$(project_name)
+  while :; do
+    selected=$(envkit_project="$selected" ENVKIT_PROJECT="$selected" "$0" list | gum filter --value "$selected") || return
+    ENVKIT_PROJECT="$selected" "$0" ls | gum table --columns "KEY,COMMENT" 2>/dev/null || true
+    action=$(printf '%s\n' set 'edit comment' unset history 'run command' 'switch project' quit | gum choose) || return
+    case "$action" in
+      set) key=$(gum input --placeholder KEY) || continue; text=$(gum input --password --placeholder value) || continue; printf '%s' "$text" | ENVKIT_PROJECT="$selected" "$0" set "$key" ;;
+      'edit comment') key=$(gum input --placeholder KEY) || continue; text=$(gum input --placeholder comment) || continue; ENVKIT_PROJECT="$selected" "$0" comment "$key" "$text" ;;
+      unset) key=$(gum input --placeholder KEY) || continue; gum confirm "Remove $key?" && ENVKIT_PROJECT="$selected" "$0" unset "$key" ;;
+      history) ENVKIT_PROJECT="$selected" "$0" log | less ;;
+      'run command') command_line=$(gum input --placeholder 'command') || continue; ENVKIT_PROJECT="$selected" "$0" run -- bash -c "$command_line" ;;
+      'switch project') selected=$(ENVKIT_PROJECT="$selected" "$0" project) ;;
+      quit) return ;;
+    esac
+  done
+}
+
+verb=${1:-help}
+[ $# -gt 0 ] && shift
+case "$verb" in
+  init) ensure_env; env_path ;;
+  path) ensure_env; env_path ;;
+  project) project_name ;;
+  set) cmd_set "$@" ;;
+  unset) [ $# -eq 1 ] || { usage; exit 2; }; valid_key "$1"; ensure_env; remove_key "$1"; commit_change "$(project_name): unset $1" ;;
+  comment) cmd_comment "$@" ;;
+  ls) [ $# -eq 0 ] || { usage; exit 2; }; cmd_ls ;;
+  get) [ $# -eq 1 ] || { usage; exit 2; }; valid_key "$1"; ensure_env; value_for "$1" ;;
+  run) [ "${1:-}" = "--" ] && shift; [ $# -gt 0 ] || { usage; exit 2; }; ensure_env; set -a; # shellcheck source=/dev/null
+       . "$(env_path)"; set +a; exec "$@" ;;
+  export) [ $# -eq 0 ] || { usage; exit 2; }; cmd_export ;;
+  log) [ $# -le 1 ] || { usage; exit 2; }; ensure_home; if [ $# -eq 1 ]; then git -C "$HOME_DIR" log -p -S "$1" -- "$(project_name)"; else git -C "$HOME_DIR" log --oneline -- "$(project_name)"; fi ;;
+  diff) [ $# -eq 0 ] || { usage; exit 2; }; ensure_home; git -C "$HOME_DIR" diff ;;
+  edit) [ $# -eq 0 ] || { usage; exit 2; }; ensure_env; "${EDITOR:-vi}" "$(env_path)"; commit_change "$(project_name): edit" ;;
+  list) [ $# -eq 0 ] || { usage; exit 2; }; ensure_home; find "$HOME_DIR" -mindepth 1 -maxdepth 1 -type d ! -name .git -exec basename {} \; | sort ;;
+  tui) [ $# -eq 0 ] || { usage; exit 2; }; cmd_tui ;;
+  help|-h|--help) usage ;;
+  *) echo "envkit: unknown verb: $verb" >&2; usage >&2; exit 2 ;;
+esac
