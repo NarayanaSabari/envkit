@@ -488,7 +488,12 @@ func (m Model) keyTable(width, height int) string {
 	// aligned against the pane edge. Keeping these widths in terminal cells
 	// avoids bubbles/table's cell padding being applied a second time.
 	keyWidth += 2
-	const valueWidth = 10 // eight bullets plus a two-cell gutter
+	valueWidth := 10 // eight bullets plus a two-cell gutter
+	if entry, ok := m.selectedKey(); ok && m.reveal {
+		// Keep the value column wide enough to show a revealed secret whenever
+		// practical, but leave room for the surrounding table columns.
+		valueWidth = max(valueWidth, min(lipgloss.Width(entry.Value), width*3/5))
+	}
 	updatedWidth++
 	const minimumCommentWidth = len("COMMENT")
 	minimumKeyWidth := lipgloss.Width("KEY") + 2
@@ -508,7 +513,10 @@ func (m Model) keyTable(width, height int) string {
 		headerStyle.Render(padRight("VALUE", valueWidth)) +
 		headerStyle.Render(padRight("COMMENT", commentWidth)) +
 		headerStyle.Render(padLeft("UPDATED", updatedWidth))
-	lines := []string{header, lipgloss.NewStyle().Foreground(mutedColor).Render(strings.Repeat("─", width))}
+	// Do not give this rule a background. Some terminal themes make a styled
+	// background indistinguishable from the pane background.
+	ruleStyle := lipgloss.NewStyle().Foreground(mutedColor)
+	lines := []string{header, ruleStyle.Render(strings.Repeat("─", width))}
 	rowCount := max(0, height-2)
 	start := 0
 	if m.keyCursor >= rowCount {
@@ -558,11 +566,14 @@ func (m Model) detail(width, height int) string {
 	} else {
 		comment = lipgloss.NewStyle().Foreground(commentColor).Render(strings.ReplaceAll(comment, "\n", " "))
 	}
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(normalColor).Render(entry.Key),
-		comment,
-		"",
+	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(normalColor).Render(entry.Key)}
+	if m.reveal {
+		valueStyle := lipgloss.NewStyle().Foreground(accentColor)
+		for _, line := range wrap(entry.Value, width) {
+			lines = append(lines, valueStyle.Render(line))
+		}
 	}
+	lines = append(lines, comment, "")
 	if err != nil {
 		lines = append(lines, muted(err.Error()))
 	} else {
@@ -641,4 +652,26 @@ func truncate(text string, length int) string {
 		b.WriteRune(r)
 	}
 	return b.String() + "…"
+}
+
+func wrap(text string, width int) []string {
+	if width < 1 {
+		return []string{""}
+	}
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		for lipgloss.Width(line) > width {
+			var part strings.Builder
+			for _, r := range line {
+				if lipgloss.Width(part.String()+string(r)) > width {
+					break
+				}
+				part.WriteRune(r)
+			}
+			lines = append(lines, part.String())
+			line = strings.TrimPrefix(line, part.String())
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }

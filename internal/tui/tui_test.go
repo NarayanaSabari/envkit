@@ -185,3 +185,71 @@ func TestKeyTableKeepsKeysAndUpdatedTimesIntact(t *testing.T) {
 		})
 	}
 }
+
+func TestRevealExpandsValueColumnAndShowsDetailValue(t *testing.T) {
+	s := store.NewForProject(t.TempDir(), "project")
+	comment := "Selected secret comment"
+	const value = "velvet_fb_1234567890abcdef"
+	if err := s.Set("VELVET_TOKEN", value, &comment); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("NEXT_TOKEN", "other-secret", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, size := range []tea.WindowSizeMsg{{Width: 120, Height: 30}, {Width: 170, Height: 50}} {
+		t.Run(fmt.Sprintf("terminal-%dx%d", size.Width, size.Height), func(t *testing.T) {
+			model := New(s)
+			updated, _ := model.Update(size)
+			model = updated.(Model)
+			updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+			model = updated.(Model)
+
+			view := ansi.Strip(model.View())
+			if !strings.Contains(view, value) {
+				t.Fatalf("revealed value is truncated or missing\n%s", view)
+			}
+			detail := ansi.Strip(model.detail(model.contentWidth(size.Width-model.projectsWidth(size.Width)), size.Height))
+			if !strings.Contains(detail, value) {
+				t.Fatalf("Detail does not contain the complete revealed value\n%s", detail)
+			}
+
+			updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+			model = updated.(Model)
+			updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+			model = updated.(Model)
+			if view := ansi.Strip(model.View()); strings.Contains(view, value) {
+				t.Fatalf("revealed value remains visible after changing rows\n%s", view)
+			}
+		})
+	}
+}
+
+func TestHeaderRuleContainsVisibleCharacters(t *testing.T) {
+	s := store.NewForProject(t.TempDir(), "project")
+	if err := s.Set("TOKEN", "secret", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range []tea.WindowSizeMsg{{Width: 80, Height: 24}, {Width: 170, Height: 50}} {
+		t.Run(fmt.Sprintf("terminal-%dx%d", size.Width, size.Height), func(t *testing.T) {
+			model := New(s)
+			updated, _ := model.Update(size)
+			model = updated.(Model)
+			view := model.View()
+			if !strings.Contains(view, "─") {
+				t.Fatalf("View output does not literally contain a header rule\n%s", view)
+			}
+			lines := strings.Split(ansi.Strip(view), "\n")
+			headerIndex := -1
+			for i, line := range lines {
+				if strings.Contains(line, "KEY") && strings.Contains(line, "VALUE") {
+					headerIndex = i
+					break
+				}
+			}
+			if headerIndex == -1 || headerIndex+1 >= len(lines) || !strings.Contains(lines[headerIndex+1], "─") {
+				t.Fatalf("table header rule line does not contain visible characters\n%s", view)
+			}
+		})
+	}
+}
