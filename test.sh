@@ -22,6 +22,8 @@ git -C "$REPO" config user.name test
 git -C "$REPO" config user.email test@example.invalid
 cd "$REPO"
 
+assert_eq "$(run version)" 'dev'
+
 for pair in \
   'https://github.com/owner/repo.git owner__repo' \
   'ssh://git@github.com/owner/repo.git owner__repo' \

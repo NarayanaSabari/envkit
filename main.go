@@ -13,6 +13,8 @@ import (
 	"github.com/NarayanaSabari/envkit/internal/tui"
 )
 
+var version = "dev"
+
 type cliError struct {
 	code int
 	err  error
@@ -28,7 +30,7 @@ func (e *cliError) Error() string {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: envkit <verb> [arguments]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "init | path | project | set KEY [-m COMMENT] | unset KEY | comment KEY TEXT")
+	fmt.Fprintln(w, "init | path | project | version | set KEY [-m COMMENT] | unset KEY | comment KEY TEXT")
 	fmt.Fprintln(w, "ls | get KEY | run [--] COMMAND... | export | log [KEY] | diff | edit | list | tui")
 }
 
@@ -53,6 +55,14 @@ func run(args []string) error {
 	}
 	if verb == "help" || verb == "-h" || verb == "--help" {
 		usage(os.Stdout)
+		return nil
+	}
+	if verb == "version" {
+		if len(args) != 0 {
+			usage(os.Stderr)
+			return &cliError{code: 2}
+		}
+		fmt.Fprintln(os.Stdout, version)
 		return nil
 	}
 	s, err := store.New("")
