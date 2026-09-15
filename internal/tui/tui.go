@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/NarayanaSabari/envkit/internal/store"
-	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -476,29 +475,48 @@ func (m Model) keyTable(width, height int) string {
 	}
 
 	updated := make([]string, len(entries))
-	keyWidth := 12
+	keyWidth := lipgloss.Width("KEY")
+	updatedWidth := lipgloss.Width("UPDATED")
 	for i, entry := range entries {
 		changed, _ := m.Store.KeyHistory(entry.Key, "%ar")
 		updated[i] = strings.TrimSpace(strings.Split(changed, "\n")[0])
 		keyWidth = max(keyWidth, lipgloss.Width(entry.Key))
+		updatedWidth = max(updatedWidth, lipgloss.Width(updated[i]))
 	}
-	keyWidth = min(keyWidth, 40)
-	const valueWidth = 12
-	const updatedWidth = 16
-	const minimumCommentWidth = len("COMMENT")
-	// The first three columns reserve two trailing spaces as gutters. The last
-	// column is right aligned and takes the pane's remaining width exactly.
-	keyWidth = min(keyWidth, max(3, width-valueWidth-updatedWidth-6-minimumCommentWidth))
-	commentWidth := max(1, width-(keyWidth+2)-(valueWidth+2)-updatedWidth-2)
 
-	columns := []table.Column{
-		{Title: "KEY", Width: keyWidth + 2},
-		{Title: "VALUE", Width: valueWidth + 2},
-		{Title: "COMMENT", Width: commentWidth + 2},
-		{Title: fmt.Sprintf("%*s", updatedWidth, "UPDATED"), Width: updatedWidth},
+	// Each width includes its trailing gutter, except UPDATED which is right
+	// aligned against the pane edge. Keeping these widths in terminal cells
+	// avoids bubbles/table's cell padding being applied a second time.
+	keyWidth += 2
+	const valueWidth = 10 // eight bullets plus a two-cell gutter
+	updatedWidth++
+	const minimumCommentWidth = len("COMMENT")
+	minimumKeyWidth := lipgloss.Width("KEY") + 2
+	minimumUpdatedWidth := lipgloss.Width("UPDATED") + 1
+	available := width - valueWidth - minimumCommentWidth
+	if available < minimumKeyWidth+minimumUpdatedWidth {
+		keyWidth = min(keyWidth, max(1, available-minimumUpdatedWidth))
+		updatedWidth = min(updatedWidth, max(1, available-keyWidth))
+	} else {
+		keyWidth = min(keyWidth, available-minimumUpdatedWidth)
+		updatedWidth = min(updatedWidth, available-keyWidth)
 	}
-	rows := make([]table.Row, 0, len(entries))
-	for i, entry := range entries {
+	commentWidth := max(1, width-keyWidth-valueWidth-updatedWidth)
+
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(normalColor)
+	header := headerStyle.Render(padRight("KEY", keyWidth)) +
+		headerStyle.Render(padRight("VALUE", valueWidth)) +
+		headerStyle.Render(padRight("COMMENT", commentWidth)) +
+		headerStyle.Render(padLeft("UPDATED", updatedWidth))
+	lines := []string{header, lipgloss.NewStyle().Foreground(mutedColor).Render(strings.Repeat("─", width))}
+	rowCount := max(0, height-2)
+	start := 0
+	if m.keyCursor >= rowCount {
+		start = m.keyCursor - rowCount + 1
+	}
+	end := min(len(entries), start+rowCount)
+	for i := start; i < end; i++ {
+		entry := entries[i]
 		value := "••••••••"
 		if i == m.keyCursor && m.reveal {
 			value = entry.Value
@@ -509,36 +527,23 @@ func (m Model) keyTable(width, height int) string {
 		commentStyle := lipgloss.NewStyle().Foreground(commentColor)
 		updatedStyle := lipgloss.NewStyle().Foreground(mutedColor)
 		if selected {
-			keyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255"))
+			background := inactiveBG
+			if m.focused == paneKeys {
+				background = selectedBG
+			}
+			keyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(background)
 			valueStyle = keyStyle
 			commentStyle = keyStyle
 			updatedStyle = keyStyle
 		}
-		rows = append(rows, table.Row{
-			keyStyle.Render(truncate(entry.Key, keyWidth)),
-			valueStyle.Render(truncate(value, valueWidth)),
-			commentStyle.Render(truncate(strings.ReplaceAll(entry.Comment, "\n", " "), commentWidth)),
-			updatedStyle.Render(fmt.Sprintf("%*s", updatedWidth, truncate(updated[i], updatedWidth))),
-		})
+		lines = append(lines,
+			keyStyle.Render(padRight(entry.Key, keyWidth))+
+				valueStyle.Render(padRight(value, valueWidth))+
+				commentStyle.Render(padRight(strings.ReplaceAll(entry.Comment, "\n", " "), commentWidth))+
+				updatedStyle.Render(padLeft(updated[i], updatedWidth)),
+		)
 	}
-
-	styles := table.DefaultStyles()
-	styles.Header = lipgloss.NewStyle().Bold(true).Foreground(normalColor).BorderBottom(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(mutedColor)
-	styles.Cell = lipgloss.NewStyle()
-	background := inactiveBG
-	if m.focused == paneKeys {
-		background = selectedBG
-	}
-	styles.Selected = lipgloss.NewStyle().Background(background)
-	t := table.New(
-		table.WithColumns(columns),
-		table.WithRows(rows),
-		table.WithWidth(width),
-		table.WithHeight(height),
-		table.WithStyles(styles),
-	)
-	t.SetCursor(m.keyCursor)
-	return t.View()
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) detail(width, height int) string {
@@ -614,6 +619,11 @@ func muted(text string) string { return lipgloss.NewStyle().Foreground(mutedColo
 func padRight(text string, width int) string {
 	text = truncate(text, width)
 	return text + strings.Repeat(" ", max(0, width-lipgloss.Width(text)))
+}
+
+func padLeft(text string, width int) string {
+	text = truncate(text, width)
+	return strings.Repeat(" ", max(0, width-lipgloss.Width(text))) + text
 }
 
 func truncate(text string, length int) string {

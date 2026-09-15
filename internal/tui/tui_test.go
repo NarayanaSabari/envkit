@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NarayanaSabari/envkit/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
@@ -115,6 +116,71 @@ func TestViewFitsTerminalAndUsesLazyGitStylePanes(t *testing.T) {
 			}
 			if detailHeight := detailBottom - detailTop + 1; detailHeight > size.Height*2/5 {
 				t.Fatalf("Detail height = %d, want <= 40%% of %d", detailHeight, size.Height)
+			}
+		})
+	}
+}
+
+func TestKeyTableKeepsKeysAndUpdatedTimesIntact(t *testing.T) {
+	s := store.NewForProject(t.TempDir(), "project")
+	entries := []struct {
+		key, value, comment string
+		when                time.Time
+	}{
+		{"SHORT", "one", "", time.Now().Add(-12 * time.Minute)},
+		{"MEDIUM_KEY12", "two", "fourteen chars", time.Now().Add(-13 * time.Minute)},
+		{"LONGEST_KEY_NAME", "three", "thirty-three characters in comment!", time.Now().Add(-14 * time.Minute)},
+	}
+	for _, entry := range entries {
+		date := entry.when.Format(time.RFC3339)
+		t.Setenv("GIT_AUTHOR_DATE", date)
+		t.Setenv("GIT_COMMITTER_DATE", date)
+		comment := entry.comment
+		if err := s.Set(entry.key, entry.value, &comment); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	updatedByKey := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		history, err := s.KeyHistory(entry.key, "%ar")
+		if err != nil {
+			t.Fatal(err)
+		}
+		updatedByKey[entry.key] = strings.TrimSpace(strings.Split(history, "\n")[0])
+	}
+
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 80, Height: 24}, {Width: 120, Height: 30},
+		{Width: 170, Height: 50}, {Width: 200, Height: 60},
+	} {
+		t.Run(fmt.Sprintf("terminal-%dx%d", size.Width, size.Height), func(t *testing.T) {
+			model := New(s)
+			updated, _ := model.Update(size)
+			model = updated.(Model)
+			lines := strings.Split(ansi.Strip(model.View()), "\n")
+			for i, line := range lines {
+				if got := lipgloss.Width(line); got > size.Width {
+					t.Fatalf("line %d width = %d, want <= %d\n%s", i, got, size.Width, model.View())
+				}
+			}
+			for _, entry := range entries {
+				var row string
+				for _, line := range lines {
+					if strings.Contains(line, entry.key) {
+						row = line
+						break
+					}
+				}
+				if row == "" {
+					t.Fatalf("row for %q not found\n%s", entry.key, model.View())
+				}
+				if !strings.Contains(row, entry.key) {
+					t.Fatalf("key %q is truncated in row %q", entry.key, row)
+				}
+				if !strings.Contains(row, updatedByKey[entry.key]) {
+					t.Fatalf("updated time %q is truncated in row %q", updatedByKey[entry.key], row)
+				}
 			}
 		})
 	}
