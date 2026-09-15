@@ -1,0 +1,51 @@
+version: 2
+
+project_name: envkit
+
+builds:
+  - id: envkit
+    main: .
+    binary: envkit
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^Merge pull request'
+      - '^Merge branch'
+
+brews:
+  - name: envkit
+    repository:
+      owner: NarayanaSabari
+      name: homebrew-tap
+      token: '{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}'
+    directory: Formula
+    description: Per-project .env vault with comments, git audit log, worktree-aware, agent-safe, with a lazydocker-style TUI.
+    homepage: https://github.com/NarayanaSabari/envkit
+    license: MIT
+    install: |
+      bin.install "envkit"
+    test: |
+      system "#{bin}/envkit", "version"
