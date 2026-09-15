@@ -18,7 +18,12 @@ type cliError struct {
 	err  error
 }
 
-func (e *cliError) Error() string { return e.err.Error() }
+func (e *cliError) Error() string {
+	if e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: envkit <verb> [arguments]")

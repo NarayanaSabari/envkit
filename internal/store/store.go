@@ -240,7 +240,7 @@ func (d Document) Entries() []Entry {
 			continue
 		}
 		if key, ok := keyAt(line); ok {
-			value, _ := d.Value(key)
+			value := strings.TrimPrefix(line, key+"=")
 			entries = append(entries, Entry{Key: key, Value: value, Comment: strings.Join(comments, "\n")})
 		}
 		comments = nil

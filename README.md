@@ -6,12 +6,19 @@ This helps keep secrets out of agent transcripts, repository diffs, and accident
 
 ## Install
 
+Install the current release with Go:
+
 ```sh
-chmod +x envkit
-ln -s "$PWD/envkit" ~/.local/bin/envkit
+go install github.com/NarayanaSabari/envkit@latest
 ```
 
-Or download the script into a directory on your `PATH`, such as `~/.local/bin`.
+Or build and install from a checkout:
+
+```sh
+make install
+```
+
+`make install` puts the single Go binary in `~/.local/bin/envkit`.
 
 ## Quick start
 
@@ -28,8 +35,8 @@ A project name is resolved from `ENVKIT_PROJECT`, `git config envkit.project`, t
 All worktrees with the same origin therefore share one env file.
 `init` creates the home directory with mode 700 and initializes its Git repository.
 
-Values are written as-is, with no quoting added.
-If a value contains spaces or shell syntax, provide shell quotes yourself, for example `"two words"`.
+Values are written as-is, with no quoting or shell expansion.
+Pipe values with spaces or shell syntax directly to `envkit set`.
 
 ## Verbs
 
@@ -49,7 +56,7 @@ If a value contains spaces or shell syntax, provide shell quotes yourself, for e
 | `diff` | Show uncommitted changes in the env storage repository. |
 | `edit` | Edit with `$EDITOR`, then commit changes. |
 | `list` | List all saved projects. |
-| `tui` | Open the optional Gum-based interactive interface. |
+| `tui` | Open the interactive terminal interface. |
 
 For agents and scripts, prefer a command boundary instead of printing secrets:
 
@@ -65,8 +72,25 @@ set -a; . "$(envkit path)"; set +a
 
 ## TUI
 
-`envkit tui` requires [Gum](https://github.com/charmbracelet/gum).
-It lets you filter projects and set values with a password field, edit comments, remove keys with confirmation, view history, run commands, and switch projects.
+`envkit tui` is a built-in Bubble Tea interface inspired by lazydocker.
+It has a project pane, masked key table, selected-key comment and history pane, and a status bar.
+Values are revealed only for the selected row and re-mask when the cursor moves.
+Every mutation uses the same local Git audit log as the CLI.
+
+| Key | Action |
+| --- | --- |
+| `tab`, `shift-tab` | Switch between Projects and Keys panes. |
+| `j` / `k`, arrows | Move the cursor in the focused pane. |
+| `enter` | Load the selected project. |
+| `a` | Add a key, hidden value, and optional comment. |
+| `e` | Edit the selected value with a hidden input. |
+| `c` | Edit the selected comment. |
+| `d`, then `y` / `n` | Delete the selected key with confirmation. |
+| `v` | Reveal or mask the selected value. |
+| `/` | Filter the focused pane. |
+| `r` | Refresh projects and keys. |
+| `esc` | Cancel an inline input. |
+| `q`, `ctrl-c` | Quit. |
 
 ## Secret output warning
 

@@ -2,11 +2,13 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ENVKIT="$ROOT/envkit"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/envkit-test.XXXXXX")
+ENVKIT="$TMP/envkit"
 HOME_DIR="$TMP/home"
 REPO="$TMP/repo"
 trap 'rm -rf "$TMP"' EXIT
+
+go build -o "$ENVKIT" "$ROOT"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_eq() { [ "$1" = "$2" ] || fail "expected [$2], got [$1]"; }
