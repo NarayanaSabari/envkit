@@ -330,13 +330,17 @@ func (m Model) selectedKey() (store.Entry, bool) {
 }
 
 func (m Model) View() string {
-	leftWidth := max(24, m.width/3)
-	rightWidth := max(38, m.width-leftWidth-1)
-	topHeight := max(8, (m.height-5)/2)
-	projects := m.pane("Projects", m.projectList(), leftWidth, topHeight, m.focused == paneProjects)
-	keys := m.pane("Keys", m.keyTable(rightWidth), rightWidth, topHeight, m.focused == paneKeys)
-	detail := m.pane("Detail", m.detail(rightWidth), rightWidth, max(6, m.height-topHeight-5), false)
-	body := lipgloss.JoinHorizontal(lipgloss.Top, projects, lipgloss.JoinVertical(lipgloss.Left, keys, detail))
+	width := max(1, m.width)
+	bodyHeight := max(1, m.height-1)
+	leftWidth := min(26, max(1, width/4))
+	rightWidth := max(1, width-leftWidth)
+	topHeight := max(1, bodyHeight*3/5)
+	detailHeight := max(1, bodyHeight-topHeight)
+	projects := m.pane("Projects", m.projectList(m.contentWidth(leftWidth)), leftWidth, topHeight, m.focused == paneProjects)
+	keys := m.pane("Keys: "+m.Store.Project, m.keyTable(m.contentWidth(rightWidth)), rightWidth, topHeight, m.focused == paneKeys)
+	top := lipgloss.JoinHorizontal(lipgloss.Top, projects, keys)
+	detail := m.pane("Detail", m.detail(m.contentWidth(width)), width, detailHeight, false)
+	body := lipgloss.JoinVertical(lipgloss.Left, top, detail)
 	status := "tab panes  j/k move  enter load  a add  e value  c comment  d delete  v reveal  / filter  r refresh  q quit"
 	if m.status != "" {
 		status = m.status + "  |  " + status
@@ -344,7 +348,8 @@ func (m Model) View() string {
 	if m.mode != promptNone && m.mode != promptConfirmDelete {
 		status = m.input.View() + "  esc cancel"
 	}
-	return body + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Width(max(1, m.width)).Render(status)
+	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Width(width)
+	return body + "\n" + statusStyle.Render(truncate(status, width))
 }
 
 func (m Model) pane(title, content string, width, height int, focused bool) string {
@@ -352,10 +357,13 @@ func (m Model) pane(title, content string, width, height int, focused bool) stri
 	if focused {
 		border = lipgloss.NewStyle().Foreground(focusedBorder)
 	}
+	title = truncate(title, m.contentWidth(width))
 	return border.Border(borderStyle).Width(max(1, width-2)).Height(max(1, height-2)).Padding(0, 1).Render(lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render(title) + "\n" + content)
 }
 
-func (m Model) projectList() string {
+func (m Model) contentWidth(paneWidth int) int { return max(1, paneWidth-4) }
+
+func (m Model) projectList(width int) string {
 	items := m.filteredProjects()
 	if len(items) == 0 {
 		return muted("No projects")
@@ -366,7 +374,7 @@ func (m Model) projectList() string {
 		if i == m.projectCursor {
 			prefix = "> "
 		}
-		lines = append(lines, prefix+project)
+		lines = append(lines, truncate(prefix+project, width))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -376,21 +384,42 @@ func (m Model) keyTable(width int) string {
 	if len(entries) == 0 {
 		return muted("No keys")
 	}
-	lines := []string{muted("KEY                 VALUE      COMMENT                 CHANGED")}
+	const (
+		cursorWidth  = 2
+		valueWidth   = 8
+		changedWidth = 14
+		columnGaps   = 3
+	)
+	// Keep every column on a single line. At ordinary terminal widths the key
+	// column reflects the longest key, while comment takes every remaining cell.
+	available := max(1, width-cursorWidth)
+	keyWidth := 3
+	for _, entry := range entries {
+		keyWidth = max(keyWidth, min(32, lipgloss.Width(entry.Key)))
+	}
+	minimumCommentWidth := lipgloss.Width("COMMENT")
+	keyWidth = min(keyWidth, max(1, available-valueWidth-changedWidth-columnGaps-minimumCommentWidth))
+	commentWidth := available - keyWidth - valueWidth - changedWidth - columnGaps
+	if commentWidth < 1 {
+		commentWidth = 1
+		keyWidth = max(1, available-valueWidth-changedWidth-columnGaps-commentWidth)
+	}
+	header := fmt.Sprintf("%-*s %-*s %-*s %*s", keyWidth, "KEY", valueWidth, "VALUE", commentWidth, "COMMENT", changedWidth, "CHANGED")
+	lines := []string{muted(truncate(header, available))}
 	for i, entry := range entries {
-		value := "••••••"
+		value := "••••••••"
 		if i == m.keyCursor && m.reveal {
 			value = entry.Value
 		}
 		changed, _ := m.Store.KeyHistory(entry.Key, "%ar")
 		changed = strings.TrimSpace(strings.Split(changed, "\n")[0])
-		line := fmt.Sprintf("%-19s %-10s %-23s %s", truncate(entry.Key, 19), truncate(value, 10), truncate(strings.ReplaceAll(entry.Comment, "\n", " "), 23), truncate(changed, 14))
+		line := fmt.Sprintf("%-*s %-*s %-*s %*s", keyWidth, truncate(entry.Key, keyWidth), valueWidth, truncate(value, valueWidth), commentWidth, truncate(strings.ReplaceAll(entry.Comment, "\n", " "), commentWidth), changedWidth, truncate(changed, changedWidth))
 		if i == m.keyCursor {
 			line = lipgloss.NewStyle().Foreground(accentColor).Render("> " + line)
 		} else {
 			line = "  " + line
 		}
-		lines = append(lines, truncate(line, max(1, width-4)))
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -400,7 +429,7 @@ func (m Model) detail(width int) string {
 	if !ok {
 		return muted("Select a key to inspect its comment and history")
 	}
-	history, err := m.Store.KeyHistory(entry.Key, "%h %ar %s")
+	history, err := m.Store.KeyHistory(entry.Key, "%h  %ar  %s")
 	if err != nil {
 		history = err.Error()
 	}
@@ -408,19 +437,34 @@ func (m Model) detail(width int) string {
 	if comment == "" {
 		comment = "(no comment)"
 	}
-	lines := []string{"Key: " + entry.Key, "Comment: " + comment, "", "History:"}
-	lines = append(lines, strings.Split(strings.TrimSpace(history), "\n")...)
-	return truncate(strings.Join(lines, "\n"), max(1, (width-4)*max(1, (m.height-5)/2)))
+	lines := []string{"Key: " + entry.Key, "Comment: " + strings.ReplaceAll(comment, "\n", " "), "", "History:"}
+	for _, line := range strings.Split(strings.TrimSpace(history), "\n") {
+		if line == "" {
+			continue
+		}
+		lines = append(lines, strings.Replace(line, m.Store.Project+": ", "", 1))
+	}
+	for i, line := range lines {
+		lines[i] = truncate(line, width)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func muted(text string) string { return lipgloss.NewStyle().Foreground(mutedColor).Render(text) }
 
 func truncate(text string, length int) string {
-	if length <= 0 || len(text) <= length {
+	if length <= 0 || lipgloss.Width(text) <= length {
 		return text
 	}
 	if length == 1 {
-		return text[:1]
+		return "…"
 	}
-	return text[:length-1] + "…"
+	var b strings.Builder
+	for _, r := range text {
+		if lipgloss.Width(b.String()+string(r)+"…") > length {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + "…"
 }
