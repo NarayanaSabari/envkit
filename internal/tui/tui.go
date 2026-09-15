@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/NarayanaSabari/envkit/internal/store"
+	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -337,7 +338,7 @@ func (m Model) View() string {
 	topHeight := max(1, bodyHeight*3/5)
 	detailHeight := max(1, bodyHeight-topHeight)
 	projects := m.pane("Projects", m.projectList(m.contentWidth(leftWidth)), leftWidth, topHeight, m.focused == paneProjects)
-	keys := m.pane("Keys: "+m.Store.Project, m.keyTable(m.contentWidth(rightWidth)), rightWidth, topHeight, m.focused == paneKeys)
+	keys := m.pane("Keys: "+m.Store.Project, m.keyTable(m.contentWidth(rightWidth), max(3, topHeight-4)), rightWidth, topHeight, m.focused == paneKeys)
 	top := lipgloss.JoinHorizontal(lipgloss.Top, projects, keys)
 	detail := m.pane("Detail", m.detail(m.contentWidth(width)), width, detailHeight, false)
 	body := lipgloss.JoinVertical(lipgloss.Left, top, detail)
@@ -379,49 +380,76 @@ func (m Model) projectList(width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) keyTable(width int) string {
+func (m Model) keyTable(width, height int) string {
 	entries := m.filteredKeys()
 	if len(entries) == 0 {
 		return muted("No keys")
 	}
+
+	updated := make([]string, len(entries))
+	updatedWidth := lipgloss.Width("UPDATED")
+	keyWidth := 8
+	for i, entry := range entries {
+		changed, _ := m.Store.KeyHistory(entry.Key, "%ar")
+		updated[i] = strings.TrimSpace(strings.Split(changed, "\n")[0])
+		updatedWidth = max(updatedWidth, lipgloss.Width(updated[i]))
+		keyWidth = max(keyWidth, lipgloss.Width(entry.Key))
+	}
+	keyWidth = min(keyWidth, 40)
+	updatedWidth = min(updatedWidth, 16)
+
 	const (
-		cursorWidth  = 2
-		valueWidth   = 8
-		changedWidth = 14
-		columnGaps   = 3
+		valueWidth        = 10
+		maximumTableWidth = 90
 	)
-	// Keep every column on a single line. At ordinary terminal widths the key
-	// column reflects the longest key, while comment takes every remaining cell.
-	available := max(1, width-cursorWidth)
-	keyWidth := 3
-	for _, entry := range entries {
-		keyWidth = max(keyWidth, min(32, lipgloss.Width(entry.Key)))
+	// A compact maximum keeps the table close to the left edge of its pane on
+	// very wide terminals, instead of spreading its columns across the screen.
+	width = min(width, maximumTableWidth)
+	// Three separator columns make the boundaries part of the actual table,
+	// rather than relying on padding that grows with the terminal width.
+	fixedWidth := valueWidth + updatedWidth + 3
+	keyWidth = min(keyWidth, max(1, width-fixedWidth-lipgloss.Width("COMMENT")))
+	commentWidth := min(60, max(1, width-fixedWidth-keyWidth))
+
+	columns := []table.Column{
+		{Title: "KEY", Width: keyWidth},
+		{Title: "│", Width: 1},
+		{Title: "VALUE", Width: valueWidth},
+		{Title: "│", Width: 1},
+		{Title: "COMMENT", Width: commentWidth},
+		{Title: "│", Width: 1},
+		{Title: fmt.Sprintf("%*s", updatedWidth, "UPDATED"), Width: updatedWidth},
 	}
-	minimumCommentWidth := lipgloss.Width("COMMENT")
-	keyWidth = min(keyWidth, max(1, available-valueWidth-changedWidth-columnGaps-minimumCommentWidth))
-	commentWidth := available - keyWidth - valueWidth - changedWidth - columnGaps
-	if commentWidth < 1 {
-		commentWidth = 1
-		keyWidth = max(1, available-valueWidth-changedWidth-columnGaps-commentWidth)
-	}
-	header := fmt.Sprintf("%-*s %-*s %-*s %*s", keyWidth, "KEY", valueWidth, "VALUE", commentWidth, "COMMENT", changedWidth, "CHANGED")
-	lines := []string{muted(truncate(header, available))}
+	rows := make([]table.Row, 0, len(entries))
 	for i, entry := range entries {
 		value := "••••••••"
 		if i == m.keyCursor && m.reveal {
 			value = entry.Value
 		}
-		changed, _ := m.Store.KeyHistory(entry.Key, "%ar")
-		changed = strings.TrimSpace(strings.Split(changed, "\n")[0])
-		line := fmt.Sprintf("%-*s %-*s %-*s %*s", keyWidth, truncate(entry.Key, keyWidth), valueWidth, truncate(value, valueWidth), commentWidth, truncate(strings.ReplaceAll(entry.Comment, "\n", " "), commentWidth), changedWidth, truncate(changed, changedWidth))
-		if i == m.keyCursor {
-			line = lipgloss.NewStyle().Foreground(accentColor).Render("> " + line)
-		} else {
-			line = "  " + line
-		}
-		lines = append(lines, line)
+		rows = append(rows, table.Row{
+			truncate(entry.Key, keyWidth),
+			"│",
+			truncate(value, valueWidth),
+			"│",
+			truncate(strings.ReplaceAll(entry.Comment, "\n", " "), commentWidth),
+			"│",
+			fmt.Sprintf("%*s", updatedWidth, truncate(updated[i], updatedWidth)),
+		})
 	}
-	return strings.Join(lines, "\n")
+
+	styles := table.DefaultStyles()
+	styles.Header = lipgloss.NewStyle().Bold(true).BorderBottom(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(mutedColor)
+	styles.Cell = lipgloss.NewStyle()
+	styles.Selected = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("57"))
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithRows(rows),
+		table.WithWidth(keyWidth+valueWidth+commentWidth+updatedWidth+3),
+		table.WithHeight(height),
+		table.WithStyles(styles),
+	)
+	t.SetCursor(m.keyCursor)
+	return t.View()
 }
 
 func (m Model) detail(width int) string {

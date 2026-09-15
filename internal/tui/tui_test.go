@@ -49,7 +49,7 @@ func TestViewFitsTerminalAndKeepsDetailFullWidth(t *testing.T) {
 		}
 	}
 
-	for _, size := range []tea.WindowSizeMsg{{Width: 80, Height: 24}, {Width: 120, Height: 40}} {
+	for _, size := range []tea.WindowSizeMsg{{Width: 80, Height: 24}, {Width: 170, Height: 40}} {
 		t.Run(fmt.Sprintf("terminal-%dx%d", size.Width, size.Height), func(t *testing.T) {
 			model := New(s)
 			updated, _ := model.Update(size)
@@ -70,8 +70,11 @@ func TestViewFitsTerminalAndKeepsDetailFullWidth(t *testing.T) {
 					break
 				}
 			}
-			if header == "" || !strings.Contains(header, "COMMENT") || !strings.Contains(header, "CHANGED") {
+			if header == "" || !strings.Contains(header, "COMMENT") || !strings.Contains(header, "UPDATED") || strings.Count(header, "│") < 3 {
 				t.Fatalf("table header is not on one line\n%s", view)
+			}
+			if size.Width == 170 && lipgloss.Width(header[:strings.LastIndex(header, "UPDATED")+len("UPDATED")]) > 120 {
+				t.Fatalf("UPDATED column is too far from the table's left edge\n%s", view)
 			}
 			for i, line := range lines {
 				if strings.Contains(line, "Detail") {
