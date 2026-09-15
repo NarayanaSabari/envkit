@@ -10,4 +10,5 @@ test:
 
 install: build
 	mkdir -p ~/.local/bin
+	rm -f ~/.local/bin/envkit
 	cp envkit ~/.local/bin/envkit

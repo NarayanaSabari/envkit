@@ -31,9 +31,13 @@ const (
 )
 
 var (
-	focusedBorder = lipgloss.Color("62")
-	mutedColor    = lipgloss.Color("241")
-	accentColor   = lipgloss.Color("212")
+	focusedBorder = lipgloss.Color("141")
+	mutedColor    = lipgloss.Color("240")
+	accentColor   = lipgloss.Color("141")
+	normalColor   = lipgloss.Color("250")
+	commentColor  = lipgloss.Color("246")
+	selectedBG    = lipgloss.Color("60")
+	inactiveBG    = lipgloss.Color("238")
 	borderStyle   = lipgloss.RoundedBorder()
 )
 
@@ -266,13 +270,33 @@ func (m *Model) startPrompt(mode promptMode, placeholder string, password ...boo
 	m.mode = mode
 	m.input.Reset()
 	m.input.Placeholder = placeholder
-	m.input.Prompt = placeholder + ": "
+	m.input.Prompt = promptLabel(mode, m.pendingKey, placeholder)
 	m.input.EchoMode = textinput.EchoNormal
 	if len(password) > 0 && password[0] {
 		m.input.EchoMode = textinput.EchoPassword
 		m.input.EchoCharacter = '•'
 	}
 	m.input.Focus()
+}
+
+func promptLabel(mode promptMode, key, placeholder string) string {
+	switch mode {
+	case promptAddKey:
+		return "Key: "
+	case promptAddValue:
+		return "Value for " + key + ": "
+	case promptAddComment:
+		key, _, _ = strings.Cut(key, "\x00")
+		return "Comment for " + key + ": "
+	case promptEditValue:
+		return "Value for " + key + ": "
+	case promptEditComment:
+		return "Comment for " + key + ": "
+	case promptFilter:
+		return "Filter: "
+	default:
+		return placeholder + ": "
+	}
 }
 
 func (m *Model) move(delta int) {
@@ -333,49 +357,114 @@ func (m Model) selectedKey() (store.Entry, bool) {
 func (m Model) View() string {
 	width := max(1, m.width)
 	bodyHeight := max(1, m.height-1)
-	leftWidth := min(26, max(1, width/4))
+	leftWidth := m.projectsWidth(width)
 	rightWidth := max(1, width-leftWidth)
-	topHeight := max(1, bodyHeight*3/5)
-	detailHeight := max(1, bodyHeight-topHeight)
-	projects := m.pane("Projects", m.projectList(m.contentWidth(leftWidth)), leftWidth, topHeight, m.focused == paneProjects)
-	keys := m.pane("Keys: "+m.Store.Project, m.keyTable(m.contentWidth(rightWidth), max(3, topHeight-4)), rightWidth, topHeight, m.focused == paneKeys)
-	top := lipgloss.JoinHorizontal(lipgloss.Top, projects, keys)
-	detail := m.pane("Detail", m.detail(m.contentWidth(width)), width, detailHeight, false)
-	body := lipgloss.JoinVertical(lipgloss.Left, top, detail)
-	status := "tab panes  j/k move  enter load  a add  e value  c comment  d delete  v reveal  / filter  r refresh  q quit"
-	if m.status != "" {
-		status = m.status + "  |  " + status
+	detailHeight := m.detailHeight(bodyHeight)
+	keysHeight := max(3, bodyHeight-detailHeight)
+	projects := m.pane("Projects", m.projectList(m.contentWidth(leftWidth)), leftWidth, bodyHeight, m.focused == paneProjects)
+	keys := m.pane(
+		fmt.Sprintf("Keys: %s (%d)", m.Store.Project, len(m.filteredKeys())),
+		m.keyTable(m.contentWidth(rightWidth), max(1, keysHeight-2)),
+		rightWidth,
+		keysHeight,
+		m.focused == paneKeys,
+	)
+	detail := m.pane("Detail", m.detail(m.contentWidth(rightWidth), max(1, detailHeight-2)), rightWidth, detailHeight, false)
+	right := lipgloss.JoinVertical(lipgloss.Left, keys, detail)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, projects, right)
+	return body + "\n" + m.keyBar(width)
+}
+
+func (m Model) projectsWidth(width int) int {
+	longest := 0
+	for _, project := range m.projects {
+		longest = max(longest, lipgloss.Width(project))
 	}
-	if m.mode != promptNone && m.mode != promptConfirmDelete {
-		status = m.input.View() + "  esc cancel"
+	ideal := max(24, longest+4)
+	cap := max(1, width*2/5)
+	return min(max(1, width-1), min(ideal, cap))
+}
+
+func (m Model) detailHeight(bodyHeight int) int {
+	maxHeight := max(1, m.height*2/5)
+	history, _ := m.selectedKeyHistory()
+	desired := 7 + len(history)
+	return min(bodyHeight-3, min(maxHeight, max(8, desired)))
+}
+
+func (m Model) keyBar(width int) string {
+	if m.mode == promptConfirmDelete {
+		return padRight("Delete "+m.pendingKey+"? y/n", width)
 	}
-	statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("236")).Width(width)
-	return body + "\n" + statusStyle.Render(truncate(status, width))
+	if m.mode != promptNone {
+		return padRight(m.input.View()+"  esc cancel", width)
+	}
+
+	items := []struct{ key, label string }{
+		{"tab", "panes"}, {"j/k", "move"}, {"enter", "load"}, {"a", "add"},
+		{"e", "value"}, {"c", "comment"}, {"d", "delete"}, {"v", "reveal"},
+		{"/", "filter"}, {"r", "refresh"}, {"q", "quit"},
+	}
+	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	labelStyle := lipgloss.NewStyle().Foreground(commentColor)
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		part := keyStyle.Render(item.key) + " " + labelStyle.Render(item.label)
+		if lipgloss.Width(strings.Join(parts, "  ")+"  "+part) > width {
+			break
+		}
+		parts = append(parts, part)
+	}
+	return lipgloss.NewStyle().Background(lipgloss.Color("236")).Render(padRight(strings.Join(parts, "  "), width))
 }
 
 func (m Model) pane(title, content string, width, height int, focused bool) string {
-	border := lipgloss.NewStyle().Foreground(mutedColor)
+	width = max(3, width)
+	height = max(3, height)
+	inner := width - 2
+	borderColor := mutedColor
+	titleColor := mutedColor
 	if focused {
-		border = lipgloss.NewStyle().Foreground(focusedBorder)
+		borderColor = focusedBorder
+		titleColor = accentColor
 	}
-	title = truncate(title, m.contentWidth(width))
-	return border.Border(borderStyle).Width(max(1, width-2)).Height(max(1, height-2)).Padding(0, 1).Render(lipgloss.NewStyle().Bold(true).Foreground(accentColor).Render(title) + "\n" + content)
+	border := lipgloss.NewStyle().Foreground(borderColor)
+	title = truncate(title, max(1, inner-4))
+	titleText := " " + title + " "
+	topFill := max(0, inner-lipgloss.Width(titleText)-1)
+	top := border.Render("╭─") + lipgloss.NewStyle().Bold(true).Foreground(titleColor).Render(titleText) + border.Render(strings.Repeat("─", topFill)+"╮")
+
+	contentLines := strings.Split(content, "\n")
+	lines := []string{top}
+	for i := 0; i < height-2; i++ {
+		line := ""
+		if i < len(contentLines) {
+			line = contentLines[i]
+		}
+		lines = append(lines, border.Render("│")+padRight(truncate(line, inner), inner)+border.Render("│"))
+	}
+	lines = append(lines, border.Render("╰")+border.Render(strings.Repeat("─", inner))+border.Render("╯"))
+	return strings.Join(lines, "\n")
 }
 
-func (m Model) contentWidth(paneWidth int) int { return max(1, paneWidth-4) }
+func (m Model) contentWidth(paneWidth int) int { return max(1, paneWidth-2) }
 
 func (m Model) projectList(width int) string {
 	items := m.filteredProjects()
 	if len(items) == 0 {
-		return muted("No projects")
+		return muted("no projects")
 	}
 	lines := make([]string, 0, len(items))
 	for i, project := range items {
-		prefix := "  "
+		style := lipgloss.NewStyle().Foreground(normalColor)
 		if i == m.projectCursor {
-			prefix = "> "
+			background := inactiveBG
+			if m.focused == paneProjects {
+				background = selectedBG
+			}
+			style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(background)
 		}
-		lines = append(lines, truncate(prefix+project, width))
+		lines = append(lines, style.Render(padRight(truncate(project, width), width)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -383,41 +472,29 @@ func (m Model) projectList(width int) string {
 func (m Model) keyTable(width, height int) string {
 	entries := m.filteredKeys()
 	if len(entries) == 0 {
-		return muted("No keys")
+		return lipgloss.NewStyle().Foreground(mutedColor).Width(width).Height(max(1, height)).Align(lipgloss.Center, lipgloss.Center).Render("no keys yet - press a to add")
 	}
 
 	updated := make([]string, len(entries))
-	updatedWidth := lipgloss.Width("UPDATED")
-	keyWidth := 8
+	keyWidth := 12
 	for i, entry := range entries {
 		changed, _ := m.Store.KeyHistory(entry.Key, "%ar")
 		updated[i] = strings.TrimSpace(strings.Split(changed, "\n")[0])
-		updatedWidth = max(updatedWidth, lipgloss.Width(updated[i]))
 		keyWidth = max(keyWidth, lipgloss.Width(entry.Key))
 	}
 	keyWidth = min(keyWidth, 40)
-	updatedWidth = min(updatedWidth, 16)
-
-	const (
-		valueWidth        = 10
-		maximumTableWidth = 90
-	)
-	// A compact maximum keeps the table close to the left edge of its pane on
-	// very wide terminals, instead of spreading its columns across the screen.
-	width = min(width, maximumTableWidth)
-	// Three separator columns make the boundaries part of the actual table,
-	// rather than relying on padding that grows with the terminal width.
-	fixedWidth := valueWidth + updatedWidth + 3
-	keyWidth = min(keyWidth, max(1, width-fixedWidth-lipgloss.Width("COMMENT")))
-	commentWidth := min(60, max(1, width-fixedWidth-keyWidth))
+	const valueWidth = 12
+	const updatedWidth = 16
+	const minimumCommentWidth = len("COMMENT")
+	// The first three columns reserve two trailing spaces as gutters. The last
+	// column is right aligned and takes the pane's remaining width exactly.
+	keyWidth = min(keyWidth, max(3, width-valueWidth-updatedWidth-6-minimumCommentWidth))
+	commentWidth := max(1, width-(keyWidth+2)-(valueWidth+2)-updatedWidth-2)
 
 	columns := []table.Column{
-		{Title: "KEY", Width: keyWidth},
-		{Title: "│", Width: 1},
-		{Title: "VALUE", Width: valueWidth},
-		{Title: "│", Width: 1},
-		{Title: "COMMENT", Width: commentWidth},
-		{Title: "│", Width: 1},
+		{Title: "KEY", Width: keyWidth + 2},
+		{Title: "VALUE", Width: valueWidth + 2},
+		{Title: "COMMENT", Width: commentWidth + 2},
 		{Title: fmt.Sprintf("%*s", updatedWidth, "UPDATED"), Width: updatedWidth},
 	}
 	rows := make([]table.Row, 0, len(entries))
@@ -426,25 +503,37 @@ func (m Model) keyTable(width, height int) string {
 		if i == m.keyCursor && m.reveal {
 			value = entry.Value
 		}
+		selected := i == m.keyCursor
+		keyStyle := lipgloss.NewStyle().Foreground(normalColor)
+		valueStyle := lipgloss.NewStyle().Foreground(mutedColor)
+		commentStyle := lipgloss.NewStyle().Foreground(commentColor)
+		updatedStyle := lipgloss.NewStyle().Foreground(mutedColor)
+		if selected {
+			keyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255"))
+			valueStyle = keyStyle
+			commentStyle = keyStyle
+			updatedStyle = keyStyle
+		}
 		rows = append(rows, table.Row{
-			truncate(entry.Key, keyWidth),
-			"│",
-			truncate(value, valueWidth),
-			"│",
-			truncate(strings.ReplaceAll(entry.Comment, "\n", " "), commentWidth),
-			"│",
-			fmt.Sprintf("%*s", updatedWidth, truncate(updated[i], updatedWidth)),
+			keyStyle.Render(truncate(entry.Key, keyWidth)),
+			valueStyle.Render(truncate(value, valueWidth)),
+			commentStyle.Render(truncate(strings.ReplaceAll(entry.Comment, "\n", " "), commentWidth)),
+			updatedStyle.Render(fmt.Sprintf("%*s", updatedWidth, truncate(updated[i], updatedWidth))),
 		})
 	}
 
 	styles := table.DefaultStyles()
-	styles.Header = lipgloss.NewStyle().Bold(true).BorderBottom(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(mutedColor)
+	styles.Header = lipgloss.NewStyle().Bold(true).Foreground(normalColor).BorderBottom(true).BorderStyle(lipgloss.NormalBorder()).BorderForeground(mutedColor)
 	styles.Cell = lipgloss.NewStyle()
-	styles.Selected = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("57"))
+	background := inactiveBG
+	if m.focused == paneKeys {
+		background = selectedBG
+	}
+	styles.Selected = lipgloss.NewStyle().Background(background)
 	t := table.New(
 		table.WithColumns(columns),
 		table.WithRows(rows),
-		table.WithWidth(keyWidth+valueWidth+commentWidth+updatedWidth+3),
+		table.WithWidth(width),
 		table.WithHeight(height),
 		table.WithStyles(styles),
 	)
@@ -452,25 +541,32 @@ func (m Model) keyTable(width, height int) string {
 	return t.View()
 }
 
-func (m Model) detail(width int) string {
+func (m Model) detail(width, height int) string {
 	entry, ok := m.selectedKey()
 	if !ok {
-		return muted("Select a key to inspect its comment and history")
+		return muted("select a key to inspect its comment and history")
 	}
 	history, err := m.Store.KeyHistory(entry.Key, "%h  %ar  %s")
-	if err != nil {
-		history = err.Error()
-	}
 	comment := entry.Comment
 	if comment == "" {
-		comment = "(no comment)"
+		comment = muted("no comment")
+	} else {
+		comment = lipgloss.NewStyle().Foreground(commentColor).Render(strings.ReplaceAll(comment, "\n", " "))
 	}
-	lines := []string{"Key: " + entry.Key, "Comment: " + strings.ReplaceAll(comment, "\n", " "), "", "History:"}
-	for _, line := range strings.Split(strings.TrimSpace(history), "\n") {
-		if line == "" {
-			continue
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(normalColor).Render(entry.Key),
+		comment,
+		"",
+	}
+	if err != nil {
+		lines = append(lines, muted(err.Error()))
+	} else {
+		for _, line := range strings.Split(strings.TrimSpace(history), "\n") {
+			if line == "" || len(lines) >= height {
+				continue
+			}
+			lines = append(lines, m.historyLine(line, width))
 		}
-		lines = append(lines, strings.Replace(line, m.Store.Project+": ", "", 1))
 	}
 	for i, line := range lines {
 		lines[i] = truncate(line, width)
@@ -478,7 +574,47 @@ func (m Model) detail(width int) string {
 	return strings.Join(lines, "\n")
 }
 
+func (m Model) selectedKeyHistory() ([]string, error) {
+	entry, ok := m.selectedKey()
+	if !ok {
+		return nil, nil
+	}
+	history, err := m.Store.KeyHistory(entry.Key, "%h  %ar  %s")
+	if err != nil {
+		return nil, err
+	}
+	return nonEmptyLines(history), nil
+}
+
+func (m Model) historyLine(line string, width int) string {
+	hash, rest, found := strings.Cut(line, "  ")
+	if !found {
+		return truncate(line, width)
+	}
+	when, subject, found := strings.Cut(rest, "  ")
+	if !found {
+		return muted(hash + "  " + rest)
+	}
+	dim := lipgloss.NewStyle().Foreground(mutedColor)
+	return dim.Render(hash) + "  " + dim.Render(when) + "  " + lipgloss.NewStyle().Foreground(normalColor).Render(subject)
+}
+
+func nonEmptyLines(text string) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 func muted(text string) string { return lipgloss.NewStyle().Foreground(mutedColor).Render(text) }
+
+func padRight(text string, width int) string {
+	text = truncate(text, width)
+	return text + strings.Repeat(" ", max(0, width-lipgloss.Width(text)))
+}
 
 func truncate(text string, length int) string {
 	if length <= 0 || lipgloss.Width(text) <= length {
