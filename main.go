@@ -30,7 +30,7 @@ func (e *cliError) Error() string {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: envkit <verb> [arguments]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "init | path | project | version | set KEY [-m COMMENT] | unset KEY | comment KEY TEXT")
+	fmt.Fprintln(w, "init | path | project | version | set KEY[=VALUE] [VALUE] [-m COMMENT] | unset KEY | comment KEY TEXT")
 	fmt.Fprintln(w, "ls | get KEY | run [--] COMMAND... | export | log [KEY] | diff | edit | list | tui")
 }
 
@@ -231,25 +231,38 @@ func setCommand(s *store.Store, args []string) error {
 		usage(os.Stderr)
 		return &cliError{code: 2}
 	}
-	key := args[0]
+	var comment *string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-m" {
+			if i+1 >= len(args) {
+				return &cliError{code: 2, err: errors.New("envkit: -m needs a comment")}
+			}
+			comment = &args[i+1]
+			i++
+			continue
+		}
+		positional = append(positional, args[i])
+	}
+	if len(positional) == 0 {
+		usage(os.Stderr)
+		return &cliError{code: 2}
+	}
+	key, value, inline := strings.Cut(positional[0], "=")
 	if err := store.ValidateKey(key); err != nil {
 		return exitForKey(err)
 	}
-	args = args[1:]
-	var comment *string
-	if len(args) > 0 && args[0] == "-m" {
-		if len(args) < 2 {
-			return &cliError{code: 2, err: errors.New("envkit: -m needs a comment")}
+	switch {
+	case len(positional) > 2, inline && len(positional) == 2:
+		return &cliError{code: 2, err: errors.New("envkit: set takes one value: KEY=VALUE or KEY VALUE")}
+	case len(positional) == 2:
+		value, inline = positional[1], true
+	}
+	if !inline {
+		var err error
+		if value, err = readValue(key); err != nil {
+			return err
 		}
-		comment = &args[1]
-		args = args[2:]
-	}
-	if len(args) != 0 {
-		return &cliError{code: 2, err: errors.New("envkit: value is read from stdin, never arguments")}
-	}
-	value, err := readValue(key)
-	if err != nil {
-		return err
 	}
 	return s.Set(key, value, comment)
 }

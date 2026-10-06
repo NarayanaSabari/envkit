@@ -50,6 +50,24 @@ printf '%s' 'other-secret' | run set REMOVE_ME
 run unset REMOVE_ME
 [ -z "$(run get REMOVE_ME)" ] || fail 'unset key is still present'
 
+run set A_KEY val1
+assert_eq "$(run get A_KEY)" 'val1'
+run set B_KEY='val=2' -m 'inline note'
+assert_eq "$(run get B_KEY)" 'val=2'
+assert_contains "$(run ls)" 'B_KEY  # inline note'
+run set C_KEY -m 'flag first' 'val 3'
+assert_eq "$(run get C_KEY)" 'val 3'
+assert_contains "$(run ls)" 'C_KEY  # flag first'
+run set D_KEY= < /dev/null
+assert_contains "$(run ls)" 'D_KEY'
+[ -z "$(run get D_KEY)" ] || fail 'D_KEY should be empty'
+status=0; run set E_KEY a b 2>/dev/null || status=$?
+assert_eq "$status" '2'
+status=0; run set F_KEY=x y 2>/dev/null || status=$?
+assert_eq "$status" '2'
+status=0; run set 'bad-key=x' 2>/dev/null || status=$?
+assert_eq "$status" '2'
+
 commits=$(git -C "$HOME_DIR" log --oneline --all | wc -l | tr -d ' ')
 [ "$commits" -ge 2 ] || fail "expected at least two audit commits, got $commits"
 

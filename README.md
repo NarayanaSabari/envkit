@@ -50,6 +50,7 @@ make install
 ```sh
 cd my-project
 printf '%s' 'example-secret' | envkit set API_TOKEN -m "Development API token"
+envkit set LOG_LEVEL=debug -m "Local log level"
 envkit ls
 # API_TOKEN  # Development API token
 envkit run -- ./script-that-needs-the-token
@@ -71,6 +72,8 @@ Worktrees with the same origin share one `.env` file.
 Every mutation creates a local Git audit commit, and `envkit log [KEY]` shows its history.
 Values are written as-is, with no quoting or shell expansion.
 Pipe values containing spaces or shell syntax directly to `envkit set`.
+Inline values (`envkit set KEY=VALUE` or `envkit set KEY VALUE`) are convenient for non-secret settings, but they land in shell history.
+Use stdin or the hidden prompt for real secrets.
 
 ## Using with coding agents
 
@@ -112,7 +115,7 @@ A pre-tool hook can block `envkit get`, `envkit export`, and direct `.env` reads
 | `path` | Create storage if needed, then print the `.env` path. |
 | `project` | Print the resolved project name. |
 | `version` | Print the envkit version. |
-| `set KEY [-m COMMENT]` | Read a secret from stdin or a hidden terminal prompt and save it. |
+| `set KEY[=VALUE] [VALUE] [-m COMMENT]` | Save a value given inline, or read it from stdin or a hidden terminal prompt. |
 | `unset KEY` | Remove a key and its directly preceding comments. |
 | `comment KEY TEXT` | Set the comment directly above an existing key. |
 | `ls` | List keys and comments, never values. |
