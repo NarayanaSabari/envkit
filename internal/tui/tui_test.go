@@ -451,8 +451,8 @@ func TestViewAndNavigationUseCachedHistoryWithoutGitOrWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(loadedCalls), "log --format="); got != 100 {
-		t.Fatalf("history calls during load = %d, want 100", got)
+	if got := strings.Count(string(loadedCalls), "log --format="); got != 1 {
+		t.Fatalf("history calls during load = %d, want 1", got)
 	}
 	if err := os.RemoveAll(s.ProjectDir()); err != nil {
 		t.Fatal(err)
@@ -488,8 +488,7 @@ func TestHistoryCacheReloadsOnRefreshAndMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// KeyHistory uses Git -S, so change the key's occurrence count.
-	if err := s.Set("TOKEN", "secret TOKEN", nil); err != nil {
+	if err := s.Set("TOKEN", "rotated-secret", nil); err != nil {
 		t.Fatal(err)
 	}
 	cached, _ := model.selectedKeyHistory()
@@ -503,7 +502,7 @@ func TestHistoryCacheReloadsOnRefreshAndMutation(t *testing.T) {
 	}
 	model.pendingKey = "TOKEN"
 	model.mode = promptEditValue
-	model.completePrompt("updated-secret TOKEN TOKEN")
+	model.completePrompt("updated-secret")
 	mutated, err := model.selectedKeyHistory()
 	if err != nil || len(mutated) != len(refreshed)+1 {
 		t.Fatalf("history after edit = %v, %v", mutated, err)

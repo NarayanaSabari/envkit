@@ -615,6 +615,30 @@ func (s *Store) KeyHistory(key, format string) (string, error) {
 	return s.log("log", "--format="+format, "-G", "^"+key+"=")
 }
 
+// KeyHistories reads every key's history in one Git scan. Format must produce
+// one metadata line per commit; changed values are not returned to callers.
+func (s *Store) KeyHistories(format string) (map[string][]string, error) {
+	text, err := s.log("log", "--format=%x00"+format, "-p", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
+	if err != nil {
+		return nil, err
+	}
+	histories := make(map[string][]string)
+	for _, commit := range strings.Split(text, "\x00")[1:] {
+		metadata, patch, _ := strings.Cut(commit, "\n")
+		seen := make(map[string]bool)
+		for line := range strings.SplitSeq(patch, "\n") {
+			if len(line) == 0 || (line[0] != '+' && line[0] != '-') {
+				continue
+			}
+			if key, ok := keyAt(line[1:]); ok && !seen[key] {
+				histories[key] = append(histories[key], metadata)
+				seen[key] = true
+			}
+		}
+	}
+	return histories, nil
+}
+
 func (s *Store) Diff() (string, error) {
 	var out []byte
 	err := s.withLock(func() error {

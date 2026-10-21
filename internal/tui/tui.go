@@ -108,9 +108,12 @@ func (m *Model) loadKeys() {
 		return
 	}
 	m.keys = keys
+	if len(keys) == 0 {
+		return
+	}
+	histories, historyErr := m.Store.KeyHistories("%h  %ar  %s")
 	for _, entry := range keys {
-		text, err := m.Store.KeyHistory(entry.Key, "%h  %ar  %s")
-		history := keyHistory{lines: nonEmptyLines(text), err: err}
+		history := keyHistory{lines: histories[entry.Key], err: historyErr}
 		if len(history.lines) > 0 {
 			_, rest, _ := strings.Cut(history.lines[0], "  ")
 			history.updated, _, _ = strings.Cut(rest, "  ")
@@ -622,16 +625,6 @@ func (m Model) historyLine(line string, width int) string {
 	subject = strings.TrimPrefix(subject, m.Store.Project+": ")
 	dim := lipgloss.NewStyle().Foreground(mutedColor)
 	return dim.Render(hash) + "  " + dim.Render(when) + "  " + lipgloss.NewStyle().Foreground(normalColor).Render(subject)
-}
-
-func nonEmptyLines(text string) []string {
-	var lines []string
-	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
-		if line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
 }
 
 func muted(text string) string { return lipgloss.NewStyle().Foreground(mutedColor).Render(text) }
