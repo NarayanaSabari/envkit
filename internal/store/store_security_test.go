@@ -55,19 +55,20 @@ func TestProjectValidationAtEveryStoreEntry(t *testing.T) {
 			home := filepath.Join(t.TempDir(), "vault")
 			s := NewForProject(home, project)
 			calls := map[string]func() error{
-				"Ensure":     s.Ensure,
-				"Read":       func() error { _, err := s.Read(); return err },
-				"Get":        func() error { _, _, err := s.Get("KEY"); return err },
-				"Entries":    func() error { _, err := s.Entries(); return err },
-				"Set":        func() error { return s.Set("KEY", "value", nil) },
-				"Unset":      func() error { return s.Unset("KEY") },
-				"Comment":    func() error { return s.Comment("KEY", "text") },
-				"Commit":     func() error { return s.Commit("bad") },
-				"Edit":       func() error { return s.Edit([]string{"false"}) },
-				"Log":        func() error { _, err := s.Log(""); return err },
-				"KeyHistory": func() error { _, err := s.KeyHistory("KEY", "%s"); return err },
-				"Diff":       func() error { _, err := s.Diff(); return err },
-				"Projects":   func() error { _, err := s.Projects(); return err },
+				"Ensure":       s.Ensure,
+				"Read":         func() error { _, err := s.Read(); return err },
+				"Get":          func() error { _, _, err := s.Get("KEY"); return err },
+				"Entries":      func() error { _, err := s.Entries(); return err },
+				"Set":          func() error { return s.Set("KEY", "value", nil) },
+				"Unset":        func() error { return s.Unset("KEY") },
+				"Comment":      func() error { return s.Comment("KEY", "text") },
+				"Commit":       func() error { return s.Commit("bad") },
+				"Edit":         func() error { return s.Edit([]string{"false"}) },
+				"Log":          func() error { _, err := s.Log(""); return err },
+				"KeyHistory":   func() error { _, err := s.KeyHistory("KEY", "%s"); return err },
+				"KeyHistories": func() error { _, err := s.KeyHistories("%s"); return err },
+				"Diff":         func() error { _, err := s.Diff(); return err },
+				"Projects":     func() error { _, err := s.Projects(); return err },
 			}
 			for name, call := range calls {
 				if err := call(); err == nil || !strings.Contains(err.Error(), "invalid project") {

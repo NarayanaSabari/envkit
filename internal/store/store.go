@@ -18,8 +18,9 @@ var keyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Store is the local envkit repository for one selected project.
 type Store struct {
-	Home    string
-	Project string
+	Home      string
+	Project   string
+	directory string
 }
 
 // New resolves the current project and creates a store handle. It does not modify disk.
@@ -39,11 +40,19 @@ func New(cwd string) (*Store, error) {
 		}
 		home = filepath.Join(userHome, ".envkit")
 	}
+	cwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return nil, err
+	}
 	project, err := ResolveProject(cwd)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Home: home, Project: project}, nil
+	directory := cwd
+	if top := gitOutput(cwd, "rev-parse", "--show-toplevel"); top != "" {
+		directory = top
+	}
+	return &Store{Home: home, Project: project, directory: directory}, nil
 }
 
 // NewForProject opens a known project, primarily for the TUI and tests.
@@ -132,6 +141,25 @@ func (s *Store) withLock(fn func() error) error {
 	if err := validateProject(s.Project); err != nil {
 		return err
 	}
+	return s.withVaultLock(func() error {
+		if err := s.ensure(); err != nil {
+			return err
+		}
+		return fn()
+	})
+}
+
+func (s *Store) withVaultLock(fn func() error) error {
+	return s.withHomeLock(func() error {
+		if err := s.ensureRepository(); err != nil {
+			return err
+		}
+		return fn()
+	})
+}
+
+// withHomeLock also serves metadata reads, which need no Git process.
+func (s *Store) withHomeLock(fn func() error) error {
 	if err := os.MkdirAll(s.Home, 0o700); err != nil {
 		return err
 	}
@@ -153,9 +181,6 @@ func (s *Store) withLock(fn func() error) error {
 	if err != nil {
 		return err
 	}
-	if err := s.ensure(); err != nil {
-		return err
-	}
 	return fn()
 }
 
@@ -173,7 +198,7 @@ func rejectSymlink(path string) error {
 	return nil
 }
 
-func (s *Store) ensure() error {
+func (s *Store) ensureRepository() error {
 	gitDir := filepath.Join(s.Home, ".git")
 	if err := rejectSymlink(gitDir); err != nil {
 		return err
@@ -185,6 +210,10 @@ func (s *Store) ensure() error {
 	} else if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (s *Store) ensure() error {
 	if err := rejectSymlink(s.ProjectDir()); err != nil {
 		return err
 	}
@@ -208,7 +237,10 @@ func (s *Store) ensure() error {
 		file.Close()
 		return err
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return s.recordDirectory()
 }
 
 func (s *Store) git(args ...string) ([]byte, error) {
@@ -572,11 +604,33 @@ func (s *Store) pathspec() string {
 }
 
 func (s *Store) commit(message string) error {
-	path := s.pathspec()
-	if _, err := s.git("add", "--", path); err != nil {
-		return err
+	return s.commitPaths(message, s.pathspec())
+}
+
+func (s *Store) commitPaths(message string, paths ...string) error {
+	var stage []string
+	for _, path := range paths {
+		_, err := os.Lstat(filepath.Join(s.Home, filepath.FromSlash(strings.TrimPrefix(path, ":(literal)"))))
+		if errors.Is(err, os.ErrNotExist) {
+			// Already-staged deletions are in HEAD but no longer in the index.
+			out, err := s.git("ls-files", "--", path)
+			if err != nil {
+				return err
+			}
+			if len(out) == 0 {
+				continue
+			}
+		} else if err != nil {
+			return err
+		}
+		stage = append(stage, path)
 	}
-	if _, err := s.git("diff", "--cached", "--quiet", "--", path); err == nil {
+	if len(stage) != 0 {
+		if _, err := s.git(append([]string{"add", "-A", "--"}, stage...)...); err != nil {
+			return err
+		}
+	}
+	if _, err := s.git(append([]string{"diff", "--cached", "--quiet", "--"}, paths...)...); err == nil {
 		return nil
 	} else {
 		var exit *exec.ExitError
@@ -584,7 +638,7 @@ func (s *Store) commit(message string) error {
 			return err
 		}
 	}
-	_, err := s.git("commit", "--only", "-q", "-m", message, "--", path)
+	_, err := s.git(append([]string{"commit", "--only", "-q", "-m", message, "--"}, paths...)...)
 	return err
 }
 
@@ -592,7 +646,7 @@ func (s *Store) log(args ...string) (string, error) {
 	var out []byte
 	err := s.withLock(func() error {
 		var err error
-		out, err = s.git(append(args, "--", s.pathspec())...)
+		out, err = s.git(append(args, "--follow", "--", s.pathspec())...)
 		return err
 	})
 	return string(out), err
@@ -618,7 +672,7 @@ func (s *Store) KeyHistory(key, format string) (string, error) {
 // KeyHistories reads every key's history in one Git scan. Format must produce
 // one metadata line per commit; changed values are not returned to callers.
 func (s *Store) KeyHistories(format string) (map[string][]string, error) {
-	text, err := s.log("log", "--format=%x00"+format, "-p", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
+	text, err := s.log("log", "--format=%x00"+format, "-p", "--unified=0", "--no-color", "--no-ext-diff", "--no-textconv")
 	if err != nil {
 		return nil, err
 	}
@@ -650,8 +704,11 @@ func (s *Store) Diff() (string, error) {
 }
 
 func (s *Store) Projects() ([]string, error) {
+	if err := validateProject(s.Project); err != nil {
+		return nil, err
+	}
 	var projects []string
-	err := s.withLock(func() error {
+	err := s.withVaultLock(func() error {
 		entries, err := os.ReadDir(s.Home)
 		if err != nil {
 			return err
