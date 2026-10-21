@@ -4,13 +4,14 @@ package store
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 var keyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -19,7 +20,6 @@ var keyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 type Store struct {
 	Home    string
 	Project string
-	CWD     string
 }
 
 // New resolves the current project and creates a store handle. It does not modify disk.
@@ -43,31 +43,47 @@ func New(cwd string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Home: home, Project: project, CWD: cwd}, nil
+	return &Store{Home: home, Project: project}, nil
 }
 
 // NewForProject opens a known project, primarily for the TUI and tests.
+// Filesystem entry points validate the project, preserving this constructor's signature.
 func NewForProject(home, project string) *Store {
 	return &Store{Home: home, Project: project}
 }
 
 // ResolveProject applies envkit's project precedence rules.
 func ResolveProject(cwd string) (string, error) {
+	project := resolveProject(cwd)
+	if err := validateProject(project); err != nil {
+		return "", err
+	}
+	return project, nil
+}
+
+func validateProject(project string) error {
+	if project == "" || project == "." || project == ".." || strings.EqualFold(project, ".git") || strings.ContainsAny(project, "/\\\x00") {
+		return fmt.Errorf("envkit: invalid project: %q", project)
+	}
+	return nil
+}
+
+func resolveProject(cwd string) string {
 	if project := os.Getenv("ENVKIT_PROJECT"); project != "" {
-		return project, nil
+		return project
 	}
 	if configured := gitOutput(cwd, "config", "--get", "envkit.project"); configured != "" {
-		return configured, nil
+		return configured
 	}
 	if remote := gitOutput(cwd, "config", "--get", "remote.origin.url"); remote != "" {
 		if slug, ok := Slug(remote); ok {
-			return slug, nil
+			return slug
 		}
 	}
 	if top := gitOutput(cwd, "rev-parse", "--show-toplevel"); top != "" {
-		return filepath.Base(top), nil
+		return filepath.Base(top)
 	}
-	return filepath.Base(cwd), nil
+	return filepath.Base(cwd)
 }
 
 // Slug extracts owner__repo from HTTPS, ssh URL, scp syntax, and host aliases.
@@ -107,22 +123,89 @@ func (s *Store) Path() string       { return filepath.Join(s.ProjectDir(), ".env
 
 // Ensure creates the private store home, its Git repository, and this project's file.
 func (s *Store) Ensure() error {
+	return s.withLock(func() error { return nil })
+}
+
+// withLock serializes all envkit processes from load through audit commit.
+// Locked helpers never call public methods, which would acquire this lock again.
+func (s *Store) withLock(fn func() error) error {
+	if err := validateProject(s.Project); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(s.Home, 0o700); err != nil {
 		return err
 	}
 	if err := os.Chmod(s.Home, 0o700); err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(s.Home, ".git")); errors.Is(err, os.ErrNotExist) {
+	fd, err := unix.Open(filepath.Join(s.Home, ".envkit.lock"), unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return err
+	}
+	lock := os.NewFile(uintptr(fd), "envkit lock")
+	defer lock.Close() // Closing releases flock, including on error paths.
+	for {
+		err = unix.Flock(fd, unix.LOCK_EX)
+		if !errors.Is(err, unix.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	return fn()
+}
+
+func rejectSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("envkit: symlink not allowed: %s", path)
+	}
+	return nil
+}
+
+func (s *Store) ensure() error {
+	gitDir := filepath.Join(s.Home, ".git")
+	if err := rejectSymlink(gitDir); err != nil {
+		return err
+	}
+	if _, err := os.Stat(gitDir); errors.Is(err, os.ErrNotExist) {
 		if _, err := s.git("init", "-q"); err != nil {
 			return err
 		}
+	} else if err != nil {
+		return err
+	}
+	if err := rejectSymlink(s.ProjectDir()); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(s.ProjectDir(), 0o700); err != nil {
 		return err
 	}
+	if err := os.Chmod(s.ProjectDir(), 0o700); err != nil {
+		return err
+	}
+	if err := rejectSymlink(s.Path()); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(s.Path()); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("envkit: env file must be regular: %s", s.Path())
+	}
 	file, err := os.OpenFile(s.Path(), os.O_CREATE, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
 		return err
 	}
 	return file.Close()
@@ -204,7 +287,7 @@ func (d *Document) Set(key, value string, comment *string) {
 		if found, ok := keyAt(existing); ok && found == key {
 			if comment != nil {
 				start := commentStart(d.Lines, i)
-				replacement := []string{"# " + *comment, line}
+				replacement := append(commentLines(*comment), line)
 				d.Lines = append(append(d.Lines[:start:start], replacement...), d.Lines[i+1:]...)
 			} else {
 				d.Lines[i] = line
@@ -213,9 +296,44 @@ func (d *Document) Set(key, value string, comment *string) {
 		}
 	}
 	if comment != nil {
-		d.Lines = append(d.Lines, "# "+*comment)
+		d.Lines = append(d.Lines, commentLines(*comment)...)
 	}
 	d.Lines = append(d.Lines, line)
+}
+
+func commentLines(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n")
+	for i := range lines {
+		lines[i] = "# " + lines[i]
+	}
+	return lines
+}
+
+func validateValue(value string) error {
+	if strings.ContainsAny(value, "\r\n\x00") {
+		return errors.New("envkit: values cannot contain CR, LF, or NUL")
+	}
+	return nil
+}
+
+func (d Document) validate() error {
+	seen := make(map[string]bool)
+	for _, line := range d.Lines {
+		if strings.ContainsRune(line, '\x00') {
+			return errors.New("envkit: document cannot contain NUL")
+		}
+		if key, ok := keyAt(line); ok {
+			if seen[key] {
+				return fmt.Errorf("envkit: duplicate key: %s", key)
+			}
+			seen[key] = true
+			if err := validateValue(strings.TrimPrefix(line, key+"=")); err != nil {
+				return fmt.Errorf("envkit: key %s: %w (CRLF documents are unsupported)", key, err)
+			}
+		}
+	}
+	return nil
 }
 
 // Unset removes a key and all directly preceding comment lines.
@@ -255,67 +373,168 @@ type Entry struct {
 }
 
 func (s *Store) Read() (Document, error) {
-	if err := s.Ensure(); err != nil {
-		return Document{}, err
-	}
+	var d Document
+	err := s.withLock(func() error {
+		var err error
+		d, err = s.read()
+		return err
+	})
+	return d, err
+}
+
+func (s *Store) read() (Document, error) {
 	data, err := os.ReadFile(s.Path())
 	if err != nil {
 		return Document{}, err
 	}
-	return Parse(data), nil
+	d := Parse(data)
+	return d, d.validate()
+}
+
+// tempFile closes a private same-directory file before it can replace .env.
+func (s *Store) tempFile(data []byte) (name string, err error) {
+	file, err := os.CreateTemp(s.ProjectDir(), ".envkit-edit-*")
+	if err != nil {
+		return "", err
+	}
+	name = file.Name()
+	defer func() {
+		if err != nil {
+			os.Remove(name)
+		}
+	}()
+	if err = file.Chmod(0o600); err != nil {
+		file.Close()
+		return name, err
+	}
+	if _, err = file.Write(data); err != nil {
+		file.Close()
+		return name, err
+	}
+	err = file.Close()
+	return name, err
 }
 
 func (s *Store) write(d Document) error {
-	return os.WriteFile(s.Path(), d.Bytes(), 0o600)
+	name, err := s.tempFile(d.Bytes())
+	if err != nil {
+		return err
+	}
+	defer os.Remove(name)
+	return os.Rename(name, s.Path())
+}
+
+func (s *Store) update(message string, change func(*Document) error) error {
+	return s.withLock(func() error {
+		d, err := s.read()
+		if err != nil {
+			return err
+		}
+		if err := change(&d); err != nil {
+			return err
+		}
+		if err := d.validate(); err != nil {
+			return err
+		}
+		if err := s.write(d); err != nil {
+			return err
+		}
+		return s.commit(message)
+	})
 }
 
 func (s *Store) Set(key, value string, comment *string) error {
 	if err := ValidateKey(key); err != nil {
 		return err
 	}
-	d, err := s.Read()
-	if err != nil {
+	if err := validateValue(value); err != nil {
 		return err
 	}
-	d.Set(key, value, comment)
-	if err := s.write(d); err != nil {
-		return err
-	}
-	return s.Commit(fmt.Sprintf("%s: set %s", s.Project, key))
+	return s.update(fmt.Sprintf("%s: set %s", s.Project, key), func(d *Document) error {
+		d.Set(key, value, comment)
+		return nil
+	})
 }
 
 func (s *Store) Comment(key, text string) error {
 	if err := ValidateKey(key); err != nil {
 		return err
 	}
-	d, err := s.Read()
-	if err != nil {
-		return err
-	}
-	value, ok := d.Value(key)
-	if !ok {
-		return fmt.Errorf("envkit: no such key: %s", key)
-	}
-	d.Set(key, value, &text)
-	if err := s.write(d); err != nil {
-		return err
-	}
-	return s.Commit(fmt.Sprintf("%s: comment %s", s.Project, key))
+	return s.update(fmt.Sprintf("%s: comment %s", s.Project, key), func(d *Document) error {
+		value, ok := d.Value(key)
+		if !ok {
+			return fmt.Errorf("envkit: no such key: %s", key)
+		}
+		d.Set(key, value, &text)
+		return nil
+	})
 }
 
 func (s *Store) Unset(key string) error {
 	if err := ValidateKey(key); err != nil {
 		return err
 	}
-	d, err := s.Read()
-	if err != nil {
-		return err
+	return s.update(fmt.Sprintf("%s: unset %s", s.Project, key), func(d *Document) error {
+		d.Unset(key)
+		return nil
+	})
+}
+
+// Edit holds the vault lock while editing a private temporary copy. Invalid or
+// failed edits leave a recovery file, never replacing the project's document.
+func (s *Store) Edit(editor []string) error {
+	if len(editor) == 0 || editor[0] == "" {
+		return errors.New("envkit: editor command is empty")
 	}
-	d.Unset(key)
-	if err := s.write(d); err != nil {
-		return err
-	}
-	return s.Commit(fmt.Sprintf("%s: unset %s", s.Project, key))
+	return s.withLock(func() error {
+		data, err := os.ReadFile(s.Path())
+		if err != nil {
+			return err
+		}
+		if err := Parse(data).validate(); err != nil {
+			return err
+		}
+		name, err := s.tempFile(data)
+		if err != nil {
+			return err
+		}
+		args := append(append([]string(nil), editor[1:]...), name)
+		cmd := exec.Command(editor[0], args...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		editorErr := cmd.Run()
+		info, err := os.Lstat(name)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("envkit: edited file must be regular: %s", name)
+		}
+		file, err := os.OpenFile(name, os.O_RDWR, 0)
+		if err != nil {
+			return err
+		}
+		if err := file.Chmod(0o600); err != nil {
+			file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+		if editorErr != nil {
+			return fmt.Errorf("envkit: editor failed; recover edits at %s: %w", name, editorErr)
+		}
+		data, err = os.ReadFile(name)
+		if err != nil {
+			return fmt.Errorf("envkit: cannot read edits at %s: %w", name, err)
+		}
+		if err := Parse(data).validate(); err != nil {
+			return fmt.Errorf("envkit: invalid edits; recover edits at %s: %w", name, err)
+		}
+		if err := os.Rename(name, s.Path()); err != nil {
+			return fmt.Errorf("envkit: cannot install edits; recover edits at %s: %w", name, err)
+		}
+		return s.commit(fmt.Sprintf("%s: edit", s.Project))
+	})
 }
 
 func (s *Store) Get(key string) (string, bool, error) {
@@ -338,65 +557,90 @@ func (s *Store) Entries() ([]Entry, error) {
 	return d.Entries(), nil
 }
 
-// Commit stages this project's env file and only creates a commit when content changed.
+// Commit audits only this project's env file, preserving unrelated staged changes.
 func (s *Store) Commit(message string) error {
-	if _, err := s.git("add", filepath.ToSlash(filepath.Join(s.Project, ".env"))); err != nil {
+	return s.withLock(func() error {
+		if _, err := s.read(); err != nil {
+			return err
+		}
+		return s.commit(message)
+	})
+}
+
+func (s *Store) pathspec() string {
+	return ":(literal)" + filepath.ToSlash(filepath.Join(s.Project, ".env"))
+}
+
+func (s *Store) commit(message string) error {
+	path := s.pathspec()
+	if _, err := s.git("add", "--", path); err != nil {
 		return err
 	}
-	cmd := exec.Command("git", "diff", "--cached", "--quiet")
-	cmd.Dir = s.Home
-	if err := cmd.Run(); err == nil {
+	if _, err := s.git("diff", "--cached", "--quiet", "--", path); err == nil {
 		return nil
+	} else {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			return err
+		}
 	}
-	_, err := s.git("commit", "-q", "-m", message)
+	_, err := s.git("commit", "--only", "-q", "-m", message, "--", path)
 	return err
 }
 
+func (s *Store) log(args ...string) (string, error) {
+	var out []byte
+	err := s.withLock(func() error {
+		var err error
+		out, err = s.git(append(args, "--", s.pathspec())...)
+		return err
+	})
+	return string(out), err
+}
+
 func (s *Store) Log(key string) (string, error) {
-	if err := s.Ensure(); err != nil {
+	if key == "" {
+		return s.log("log", "--oneline")
+	}
+	if err := ValidateKey(key); err != nil {
 		return "", err
 	}
-	args := []string{"log", "--oneline"}
-	if key != "" {
-		args = []string{"log", "-p", "-S", key}
-	}
-	args = append(args, "--", s.Project)
-	out, err := s.git(args...)
-	return string(out), err
+	return s.log("log", "-p", "-G", "^"+key+"=")
 }
 
 func (s *Store) KeyHistory(key, format string) (string, error) {
-	if err := s.Ensure(); err != nil {
+	if err := ValidateKey(key); err != nil {
 		return "", err
 	}
-	out, err := s.git("log", "--format="+format, "-S", key, "--", s.Project)
-	return string(out), err
+	return s.log("log", "--format="+format, "-G", "^"+key+"=")
 }
 
 func (s *Store) Diff() (string, error) {
-	if err := s.Ensure(); err != nil {
-		return "", err
-	}
-	out, err := s.git("diff")
+	var out []byte
+	err := s.withLock(func() error {
+		var err error
+		out, err = s.git("diff")
+		return err
+	})
 	return string(out), err
 }
 
 func (s *Store) Projects() ([]string, error) {
-	if err := s.Ensure(); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(s.Home)
-	if err != nil {
-		return nil, err
-	}
 	var projects []string
-	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != ".git" {
-			projects = append(projects, entry.Name())
+	err := s.withLock(func() error {
+		entries, err := os.ReadDir(s.Home)
+		if err != nil {
+			return err
 		}
-	}
+		for _, entry := range entries {
+			if entry.IsDir() && validateProject(entry.Name()) == nil {
+				projects = append(projects, entry.Name())
+			}
+		}
+		return nil
+	})
 	sort.Strings(projects)
-	return projects, nil
+	return projects, err
 }
 
 // MergeEnv overlays values from the document on an environment list.
@@ -424,14 +668,4 @@ func MergeEnv(base []string, entries []Entry) []string {
 		merged = append(merged, key+"="+values[key])
 	}
 	return merged
-}
-
-// CopyTo writes the raw document to w. It is useful to CLI callers that need no parsing.
-func (s *Store) CopyTo(w io.Writer) error {
-	d, err := s.Read()
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(d.Bytes())
-	return err
 }
