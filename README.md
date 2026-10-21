@@ -74,6 +74,7 @@ Every mutation creates a local Git audit commit. `envkit log` shows metadata-onl
 Values are written as-is, with no quoting or shell expansion. This raw storage format is not a shell script: never source it.
 Values must be single-line and cannot contain NUL bytes. Duplicate keys in storage are errors.
 Comments may span multiple lines; each line is stored as a comment.
+Project directories and `.env` files must not be symlinks; envkit rejects them.
 Pipe values containing spaces or shell syntax directly to `envkit set`.
 Inline values (`envkit set KEY=VALUE` or `envkit set KEY VALUE`) are convenient for non-secret settings, but they land in shell history.
 Use stdin or the hidden prompt for real secrets.
@@ -132,6 +133,10 @@ Command boundaries do not prevent the invoked program from printing its environm
 | `edit` | Edit with `$EDITOR` under the storage lock, then validate and commit changes. |
 | `list` | List all saved projects. |
 | `tui` | Open the interactive terminal interface. |
+
+`envkit edit` opens a private temporary file in the project storage directory while holding
+the storage lock. Valid edits are atomically installed and committed. Invalid edits leave
+the original unchanged and report the retained temporary file path for recovery.
 
 ## TUI
 
