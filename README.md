@@ -69,8 +69,11 @@ A project name resolves in this order:
 4. The worktree directory
 
 Worktrees with the same origin share one `.env` file.
-Every mutation creates a local Git audit commit, and `envkit log [KEY]` shows its history.
-Values are written as-is, with no quoting or shell expansion.
+Every mutation creates a local Git audit commit. `envkit log` shows metadata-only history;
+`envkit log KEY` shows patches that can contain current and past secrets.
+Values are written as-is, with no quoting or shell expansion. This raw storage format is not a shell script: never source it.
+Values must be single-line and cannot contain NUL bytes. Duplicate keys in storage are errors.
+Comments may span multiple lines; each line is stored as a comment.
 Pipe values containing spaces or shell syntax directly to `envkit set`.
 Inline values (`envkit set KEY=VALUE` or `envkit set KEY VALUE`) are convenient for non-secret settings, but they land in shell history.
 Use stdin or the hidden prompt for real secrets.
@@ -83,11 +86,9 @@ Prefer a command boundary so a secret never needs to be printed:
 envkit run -- your-command
 ```
 
-When a process must load the file itself:
-
-```sh
-set -a; . "$(envkit path)"; set +a
-```
+When a process must load the file itself, use a programmatic loader that treats each
+`KEY=VALUE` value literally, without shell expansion or quote removal. Do not source
+the raw storage file or use a loader that interprets its values as shell syntax.
 
 Use `envkit ls` to show names and comments without values.
 Have the user run `envkit set KEY` in their own terminal so the value never enters the chat.
@@ -99,13 +100,17 @@ Paste this into `AGENTS.md` or `CLAUDE.md`:
 
 - Keep secrets in envkit, not in repository `.env` files or chat messages.
 - Use `envkit run -- command` when possible.
-- If a process needs the file, run `set -a; . "$(envkit path)"; set +a`.
-- Use `envkit ls` only for key names and comments.
-- Never run `envkit get` or `envkit export`.
+- If a process needs the file, use a programmatic loader that reads values literally; never source the raw storage file.
+- Use `envkit ls` only for key names and comments, and keep secrets out of comments.
+- Use `envkit log` without a key for metadata-only history.
+- Never run `envkit get`, `envkit export`, `envkit log KEY`, or `envkit diff`; they can print secrets.
 - Ask the user to run `envkit set KEY` in their own terminal for new values.
 ```
 
-A pre-tool hook can block `envkit get`, `envkit export`, and direct `.env` reads to enforce this pattern before a command runs.
+A pre-tool hook should block `envkit get`, `envkit export`, `envkit log` with any key argument,
+`envkit diff`, and direct `.env` reads. Allow only argument-free `envkit log` for metadata-only
+history. Key history and diffs print patches, including secrets from older revisions.
+Command boundaries do not prevent the invoked program from printing its environment; use trusted commands.
 
 ## Commands
 
@@ -121,10 +126,10 @@ A pre-tool hook can block `envkit get`, `envkit export`, and direct `.env` reads
 | `ls` | List keys and comments, never values. |
 | `get KEY` | Print one value. |
 | `run [--] COMMAND...` | Execute a command with the project env loaded. |
-| `export` | Print shell `export` statements. |
-| `log [KEY]` | Show project history, or pickaxe history for one key. |
-| `diff` | Show uncommitted changes in the env storage repository. |
-| `edit` | Edit with `$EDITOR`, then commit changes. |
+| `export` | Print single-quoted shell `export` statements, including secret values. |
+| `log [KEY]` | Show metadata-only project history, or secret-bearing patches for one key. |
+| `diff` | Show uncommitted patches, potentially including secrets, in the env storage repository. |
+| `edit` | Edit with `$EDITOR` under the storage lock, then validate and commit changes. |
 | `list` | List all saved projects. |
 | `tui` | Open the interactive terminal interface. |
 
@@ -164,7 +169,9 @@ Every mutation uses the same local Git audit log as the CLI.
 
 Secrets are stored as plain text at rest.
 `envkit` relies on FileVault and storage permissions of mode 700 to protect local files.
-`get` and `export` intentionally print secrets, so use them only in a safe terminal context.
+`get`, `export`, `log KEY`, and `diff` can print secrets, including past values in patches;
+use them only in a safe terminal context. Argument-free `log` prints commit metadata only.
+`export` quotes values for shell evaluation; the raw `.env` storage file does not and must never be sourced.
 Sync the storage repository to a private remote if you want an off-machine backup.
 Encryption is out of scope for now.
 

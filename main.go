@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -159,7 +160,7 @@ func run(args []string) error {
 			return err
 		}
 		for _, entry := range entries {
-			fmt.Fprintf(os.Stdout, "export %s=%s\n", entry.Key, entry.Value)
+			fmt.Fprintf(os.Stdout, "export %s='%s'\n", entry.Key, strings.ReplaceAll(entry.Value, "'", "'\"'\"'"))
 		}
 	case "log":
 		if len(args) > 1 {
@@ -188,21 +189,11 @@ func run(args []string) error {
 		if err := requireNoArgs(); err != nil {
 			return err
 		}
-		if err := s.Ensure(); err != nil {
-			return err
-		}
 		editor := strings.Fields(os.Getenv("EDITOR"))
 		if len(editor) == 0 {
 			editor = []string{"vi"}
 		}
-		cmd := exec.Command(editor[0], append(editor[1:], s.Path())...)
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			return err
-		}
-		if err := s.Commit(fmt.Sprintf("%s: edit", s.Project)); err != nil {
-			return err
-		}
+		return s.Edit(editor)
 	case "list":
 		if err := requireNoArgs(); err != nil {
 			return err
@@ -274,7 +265,7 @@ func exitForKey(err error) error {
 	return err
 }
 
-func readValue(key string) (string, error) {
+func readValue(key string) (value string, err error) {
 	info, err := os.Stdin.Stat()
 	if err != nil {
 		return "", err
@@ -284,17 +275,26 @@ func readValue(key string) (string, error) {
 		return strings.TrimRight(string(data), "\n"), err
 	}
 	fmt.Fprintf(os.Stderr, "value for %s: ", key)
+	state := exec.Command("stty", "-g")
+	state.Stdin = os.Stdin
+	saved, err := state.Output()
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		on := exec.Command("stty", strings.TrimSpace(string(saved)))
+		on.Stdin = os.Stdin
+		err = errors.Join(err, on.Run())
+		fmt.Fprintln(os.Stderr)
+	}()
 	off := exec.Command("stty", "-echo")
 	off.Stdin = os.Stdin
 	if err := off.Run(); err != nil {
 		return "", err
 	}
-	defer func() {
-		on := exec.Command("stty", "echo")
-		on.Stdin = os.Stdin
-		_ = on.Run()
-		fmt.Fprintln(os.Stderr)
-	}()
-	line, err := io.ReadAll(os.Stdin)
-	return strings.TrimRight(string(line), "\r\n"), err
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	return strings.TrimRight(line, "\r\n"), err
 }

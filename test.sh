@@ -68,6 +68,21 @@ assert_eq "$status" '2'
 status=0; run set 'bad-key=x' 2>/dev/null || status=$?
 assert_eq "$status" '2'
 
+printf '%s' 'two words' | run set EXPORT_SPACES
+printf '%s' '' | run set EXPORT_EMPTY
+printf '%s' '$HOME ${USER}' | run set EXPORT_DOLLAR
+printf '%s' "single'quote and \"double\" quotes" | run set EXPORT_QUOTES
+printf '%s' '$(printf SHELL_EXECUTED)' | run set EXPORT_COMMAND
+exports=$(run export)
+sh -c '
+  eval "$1"
+  [ "$EXPORT_SPACES" = "two words" ] &&
+  [ "${EXPORT_EMPTY+set}:$EXPORT_EMPTY" = "set:" ] &&
+  [ "$EXPORT_DOLLAR" = "$2" ] &&
+  [ "$EXPORT_QUOTES" = "$3" ] &&
+  [ "$EXPORT_COMMAND" = "$4" ]
+' sh "$exports" '$HOME ${USER}' "single'quote and \"double\" quotes" '$(printf SHELL_EXECUTED)' || fail 'export shell round trip failed'
+
 commits=$(git -C "$HOME_DIR" log --oneline --all | wc -l | tr -d ' ')
 [ "$commits" -ge 2 ] || fail "expected at least two audit commits, got $commits"
 
@@ -76,4 +91,4 @@ WT="$TMP/worktree"
 git -C "$REPO" worktree add -q "$WT"
 assert_eq "$(cd "$WT" && ENVKIT_HOME="$HOME_DIR" "$ENVKIT" project)" 'owner__repo'
 
-echo 'ok: project URL forms, secret operations, audit log, and worktree resolution'
+echo 'ok: project URL forms, secret operations, shell exports, audit log, and worktree resolution'
