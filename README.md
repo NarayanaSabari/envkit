@@ -151,14 +151,25 @@ Every mutation uses the same local Git audit log as the CLI.
 | `j` / `k`, arrows | Move the cursor in the focused pane. |
 | `enter` | Load the selected project. |
 | `a` | Add a key, hidden value, and optional comment. |
-| `e` | Edit the selected value with a hidden input. |
+| `e` | Projects pane: rename the highlighted project. Keys pane: edit the selected value with a hidden input. |
 | `c` | Edit the selected comment. |
-| `d`, then `y` / `n` | Delete the selected key with confirmation. |
+| `d`, then `y` / `n` | Projects pane: delete the highlighted project and all its keys. Keys pane: delete the selected key. Both require confirmation. |
 | `v` | Reveal or mask the selected value. |
 | `/` | Filter the focused pane. |
 | `r` | Refresh projects and keys. |
 | `esc` | Cancel an inline input. |
 | `q`, `ctrl-c` | Quit. |
+
+Focus Projects to see the highlighted project's **linked directories** and its separate vault-file path in Detail.
+Directory links are recorded locally when you use envkit from a repository or worktree, using its root directory.
+Several visited worktrees can share one project. Older projects show “Unknown” until used from their source directory.
+These directory links are local metadata, not part of Git backups, and are not inferred from the vault location.
+
+Renaming changes the vault name, not the repository directory or project-resolution rules.
+From the related repository, run `git config envkit.project NEW_NAME` (or set `ENVKIT_PROJECT`)
+to keep using the renamed vault. Deleting removes the saved project, not its source directories.
+Past secret values remain recoverable in the local Git audit history, so deletion is not secure erasure.
+Projects with unexpected files, including recovery edits, must be cleaned up explicitly before deletion.
 
 ## Compared to
 

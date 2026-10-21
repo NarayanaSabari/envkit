@@ -215,6 +215,7 @@ func TestRevealExpandsValueColumnAndShowsDetailValue(t *testing.T) {
 			model := New(s)
 			updated, _ := model.Update(size)
 			model = updated.(Model)
+			model.focused = paneKeys
 			updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
 			model = updated.(Model)
 
@@ -447,6 +448,7 @@ func TestViewAndNavigationUseCachedHistoryWithoutGitOrWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	model := New(s)
+	model.focused = paneKeys
 	loadedCalls, err := os.ReadFile(calls)
 	if err != nil {
 		t.Fatal(err)
@@ -462,7 +464,6 @@ func TestViewAndNavigationUseCachedHistoryWithoutGitOrWrites(t *testing.T) {
 		if !strings.Contains(view, "initial keys") {
 			t.Fatalf("cached history missing from detail\n%s", view)
 		}
-		model = press(model, tea.KeyMsg{Type: tea.KeyTab})
 		model = press(model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 		model = applyFilter(model, "KEY_00")
 	}

@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/NarayanaSabari/envkit/internal/store"
@@ -28,6 +29,8 @@ const (
 	promptEditComment
 	promptFilter
 	promptConfirmDelete
+	promptRenameProject
+	promptDeleteProject
 )
 
 var (
@@ -51,6 +54,7 @@ type keyHistory struct {
 type Model struct {
 	Store         *store.Store
 	projects      []string
+	directories   map[string][]string
 	keys          []store.Entry
 	history       map[string]keyHistory
 	projectCursor int
@@ -90,6 +94,14 @@ func (m *Model) refreshProjects() {
 		return
 	}
 	m.projects = projects
+	m.directories = make(map[string][]string)
+	for _, project := range projects {
+		dirs, err := m.Store.ProjectDirectories(project)
+		if err != nil {
+			m.status = err.Error()
+		}
+		m.directories[project] = dirs
+	}
 	for i, project := range m.filteredProjects() {
 		if project == m.Store.Project {
 			m.projectCursor = i
@@ -102,12 +114,18 @@ func (m *Model) loadKeys() {
 	defer m.clampCursors()
 	m.keys = nil
 	m.history = make(map[string]keyHistory)
+	if !slices.Contains(m.projects, m.Store.Project) {
+		return
+	}
 	keys, err := m.Store.Entries()
 	if err != nil {
 		m.status = err.Error()
 		return
 	}
 	m.keys = keys
+	if dirs, err := m.Store.ProjectDirectories(m.Store.Project); err == nil {
+		m.directories[m.Store.Project] = dirs
+	}
 	if len(keys) == 0 {
 		return
 	}
@@ -142,6 +160,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	m.status = ""
 	switch key.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
@@ -163,7 +182,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.startPrompt(promptAddKey, "key")
 	case "e":
-		if entry, ok := m.selectedKey(); ok {
+		if m.focused == paneProjects {
+			if project, ok := m.selectedProject(); ok {
+				m.pendingKey = project
+				m.startPrompt(promptRenameProject, "new project name")
+				m.input.SetValue(project)
+			}
+		} else if entry, ok := m.selectedKey(); ok {
 			m.pendingKey = entry.Key
 			m.startPrompt(promptEditValue, "new value", true)
 		}
@@ -173,7 +198,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.startPrompt(promptEditComment, "comment")
 		}
 	case "d":
-		if entry, ok := m.selectedKey(); ok {
+		m.reveal = false
+		if m.focused == paneProjects {
+			if project, ok := m.selectedProject(); ok {
+				m.pendingKey = project
+				m.mode = promptDeleteProject
+			}
+		} else if entry, ok := m.selectedKey(); ok {
 			m.pendingKey = entry.Key
 			m.mode = promptConfirmDelete
 			m.status = fmt.Sprintf("Delete %s? (y/n)", entry.Key)
@@ -185,30 +216,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "/":
 		m.startPrompt(promptFilter, "filter")
 	case "r":
+		m.status = "refreshed"
 		m.refreshProjects()
 		m.loadKeys()
-		m.status = "refreshed"
 	}
 	return m, nil
 }
 
 func (m Model) updatePrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
 	key, isKey := msg.(tea.KeyMsg)
-	if m.mode == promptConfirmDelete {
+	if m.mode == promptConfirmDelete || m.mode == promptDeleteProject {
 		if !isKey {
 			return m, nil
 		}
 		switch key.String() {
 		case "y":
-			if err := m.Store.Unset(m.pendingKey); err != nil {
+			if m.mode == promptDeleteProject {
+				if err := m.Store.DeleteProject(m.pendingKey); err != nil {
+					m.status = err.Error()
+				} else {
+					m.filter = ""
+					m.refreshProjects()
+					if m.Store.Project == m.pendingKey && len(m.projects) > 0 {
+						m.Store = store.NewForProject(m.Store.Home, m.projects[0])
+					}
+					m.loadKeys()
+					m.status = "deleted project " + m.pendingKey
+				}
+			} else if err := m.Store.Unset(m.pendingKey); err != nil {
 				m.status = err.Error()
 			} else {
 				m.status = "deleted " + m.pendingKey
 				m.loadKeys()
 			}
-		case "n", "esc":
+		case "n", "esc", "ctrl+c":
 			m.status = "cancelled"
+		default:
+			return m, nil
 		}
+		m.pendingKey = ""
 		m.mode = promptNone
 		return m, nil
 	}
@@ -255,6 +301,7 @@ func (m *Model) completePrompt(value string) {
 			m.status = err.Error()
 		} else {
 			m.status = "saved " + key
+			m.refreshProjects()
 			m.loadKeys()
 		}
 	case promptEditValue:
@@ -271,6 +318,24 @@ func (m *Model) completePrompt(value string) {
 			m.status = "commented " + m.pendingKey
 			m.loadKeys()
 		}
+	case promptRenameProject:
+		if err := m.Store.RenameProject(m.pendingKey, value); err != nil {
+			m.status = err.Error()
+		} else {
+			if m.Store.Project == m.pendingKey {
+				m.Store = store.NewForProject(m.Store.Home, value)
+			}
+			m.filter = ""
+			m.refreshProjects()
+			for i, project := range m.projects {
+				if project == value {
+					m.projectCursor = i
+					break
+				}
+			}
+			m.loadKeys()
+			m.status = "renamed project to " + value + "; update envkit.project in source repo"
+		}
 	case promptFilter:
 		m.filter = value
 		m.clampCursors()
@@ -282,6 +347,7 @@ func (m *Model) completePrompt(value string) {
 
 func (m *Model) startPrompt(mode promptMode, placeholder string, password ...bool) {
 	m.mode = mode
+	m.reveal = false
 	m.input.Reset()
 	m.input.Placeholder = placeholder
 	m.input.Prompt = promptLabel(mode, m.pendingKey, placeholder)
@@ -306,6 +372,8 @@ func promptLabel(mode promptMode, key, placeholder string) string {
 		return "Value for " + key + ": "
 	case promptEditComment:
 		return "Comment for " + key + ": "
+	case promptRenameProject:
+		return "Rename " + key + " to: "
 	case promptFilter:
 		return "Filter: "
 	default:
@@ -360,6 +428,14 @@ func filterStrings(items []string, filter string) []string {
 	return result
 }
 
+func (m Model) selectedProject() (string, bool) {
+	projects := m.filteredProjects()
+	if m.projectCursor < 0 || m.projectCursor >= len(projects) {
+		return "", false
+	}
+	return projects[m.projectCursor], true
+}
+
 func (m Model) selectedKey() (store.Entry, bool) {
 	keys := m.filteredKeys()
 	if m.keyCursor < 0 || m.keyCursor >= len(keys) {
@@ -376,8 +452,12 @@ func (m Model) View() string {
 	detailHeight := m.detailHeight(bodyHeight)
 	keysHeight := max(3, bodyHeight-detailHeight)
 	projects := m.pane("Projects", m.projectList(m.contentWidth(leftWidth)), leftWidth, bodyHeight, m.focused == paneProjects)
+	keysTitle := fmt.Sprintf("Keys: %s (%d)", m.Store.Project, len(m.filteredKeys()))
+	if !slices.Contains(m.projects, m.Store.Project) {
+		keysTitle = "Keys: no project loaded"
+	}
 	keys := m.pane(
-		fmt.Sprintf("Keys: %s (%d)", m.Store.Project, len(m.filteredKeys())),
+		keysTitle,
 		m.keyTable(m.contentWidth(rightWidth), max(1, keysHeight-2)),
 		rightWidth,
 		keysHeight,
@@ -403,10 +483,17 @@ func (m Model) detailHeight(bodyHeight int) int {
 	maxHeight := max(1, m.height*2/5)
 	history, _ := m.selectedKeyHistory()
 	desired := 7 + len(history)
+	if m.focused == paneProjects {
+		project, _ := m.selectedProject()
+		desired = 6 + len(m.directories[project])
+	}
 	return min(bodyHeight-3, min(maxHeight, max(8, desired)))
 }
 
 func (m Model) keyBar(width int) string {
+	if m.mode == promptDeleteProject {
+		return padRight("Delete project and ALL keys: "+m.pendingKey+"? y/n", width)
+	}
 	if m.mode == promptConfirmDelete {
 		return padRight("Delete "+m.pendingKey+"? y/n", width)
 	}
@@ -414,9 +501,16 @@ func (m Model) keyBar(width int) string {
 		return padRight(m.input.View()+"  esc cancel", width)
 	}
 
+	if m.status != "" {
+		return padRight(m.status, width)
+	}
+	editLabel := "value"
+	if m.focused == paneProjects {
+		editLabel = "rename"
+	}
 	items := []struct{ key, label string }{
 		{"tab", "panes"}, {"j/k", "move"}, {"enter", "load"}, {"a", "add"},
-		{"e", "value"}, {"c", "comment"}, {"d", "delete"}, {"v", "reveal"},
+		{"e", editLabel}, {"c", "comment"}, {"d", "delete"}, {"v", "reveal"},
 		{"/", "filter"}, {"r", "refresh"}, {"q", "quit"},
 	}
 	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
@@ -569,6 +663,23 @@ func (m Model) keyTable(width, height int) string {
 }
 
 func (m Model) detail(width, height int) string {
+	if m.focused == paneProjects {
+		project, ok := m.selectedProject()
+		if !ok {
+			return muted("no project selected")
+		}
+		lines := []string{project, "Linked directories:"}
+		dirs := m.directories[project]
+		if len(dirs) == 0 {
+			lines = append(lines, "Unknown: open envkit from this project's directory.")
+		}
+		for _, dir := range dirs {
+			lines = append(lines, wrap(dir, width)...)
+		}
+		lines = append(lines, "", "Vault file:")
+		lines = append(lines, wrap(store.NewForProject(m.Store.Home, project).Path(), width)...)
+		return strings.Join(lines, "\n")
+	}
 	entry, ok := m.selectedKey()
 	if !ok {
 		return muted("select a key to inspect its comment and history")
