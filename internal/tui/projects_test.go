@@ -8,6 +8,7 @@ import (
 
 	"github.com/NarayanaSabari/envkit/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func projectKey(m Model, key string) Model {
@@ -150,7 +151,23 @@ func TestProjectDetailShowsKnownDirectoriesForHighlightedProject(t *testing.T) {
 	if err := legacy.Ensure(); err != nil {
 		t.Fatal(err)
 	}
+	secondRoot := t.TempDir()
+	second, err := store.New(secondRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Ensure(); err != nil {
+		t.Fatal(err)
+	}
 	m := New(s)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 240, Height: 50})
+	m = updated.(Model)
+	view := ansi.Strip(m.View())
+	for _, path := range []string{repo, secondRoot, s.Path()} {
+		if !strings.Contains(view, path) {
+			t.Fatalf("project detail clipped %q:\n%s", path, view)
+		}
+	}
 	if detail := m.detail(200, 30); !strings.Contains(detail, repo) || !strings.Contains(detail, "Linked directories:") || !strings.Contains(detail, s.Path()) {
 		t.Fatalf("missing related directory or vault distinction: %s", detail)
 	}

@@ -484,8 +484,8 @@ func (m Model) detailHeight(bodyHeight int) int {
 	history, _ := m.selectedKeyHistory()
 	desired := 7 + len(history)
 	if m.focused == paneProjects {
-		project, _ := m.selectedProject()
-		desired = 6 + len(m.directories[project])
+		width := m.contentWidth(max(1, m.width-m.projectsWidth(max(1, m.width))))
+		desired = 3 + strings.Count(m.detail(width, bodyHeight), "\n")
 	}
 	return min(bodyHeight-3, min(maxHeight, max(8, desired)))
 }

@@ -169,6 +169,7 @@ Renaming changes the vault name, not the repository directory or project-resolut
 From the related repository, run `git config envkit.project NEW_NAME` (or set `ENVKIT_PROJECT`)
 to keep using the renamed vault. Deleting removes the saved project, not its source directories.
 Past secret values remain recoverable in the local Git audit history, so deletion is not secure erasure.
+Unsaved file changes are snapshotted before renaming or deleting; a failed operation may still leave that audit snapshot.
 Projects with unexpected files, including recovery edits, must be cleaned up explicitly before deletion.
 
 ## Compared to

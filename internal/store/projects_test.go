@@ -118,6 +118,52 @@ func TestRenameProjectExplicitTargetAndHistory(t *testing.T) {
 	}
 }
 
+func TestRenameProjectSnapshotsDirtyContentToPreserveHistory(t *testing.T) {
+	s := testStore(t, "old")
+	if err := s.Set("KEY", "first", nil); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, s.Path(), "KEY=second\n")
+	stage := stageUnrelated(t, s)
+	if err := s.RenameProject("old", "new"); err != nil {
+		t.Fatal(err)
+	}
+	next := NewForProject(s.Home, "new")
+	for _, readHistory := range []func() (string, error){
+		func() (string, error) { return next.Log("") },
+		func() (string, error) { return next.Log("KEY") },
+		func() (string, error) { return next.KeyHistory("KEY", "%s") },
+	} {
+		history, err := readHistory()
+		if err != nil || !strings.Contains(history, "old: set KEY") || !strings.Contains(history, "old: snapshot before rename") {
+			t.Fatalf("history lost dirty rename lineage: %q, %v", history, err)
+		}
+	}
+	histories, err := next.KeyHistories("%s")
+	if err != nil || !reflect.DeepEqual(histories["KEY"], []string{"old: snapshot before rename", "old: set KEY"}) {
+		t.Fatalf("batched history lost lineage: %v, %v", histories, err)
+	}
+	if got := readFile(t, next.Path()); got != "KEY=second\n" {
+		t.Fatalf("rename lost current value: %q", got)
+	}
+	assertUnrelatedStaging(t, s, stage)
+}
+
+func TestRenameEmptyProjectPreservesDeletedKeyHistory(t *testing.T) {
+	s := testStore(t, "old")
+	if err := s.Set("KEY", "first", nil); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, s.Path(), "")
+	if err := s.RenameProject("old", "new"); err != nil {
+		t.Fatal(err)
+	}
+	history, err := NewForProject(s.Home, "new").KeyHistories("%s")
+	if err != nil || len(history["KEY"]) != 2 {
+		t.Fatalf("empty rename lost deleted key history: %v, %v", history, err)
+	}
+}
+
 func TestRenameProjectNeverAuditedAndStagedDeletion(t *testing.T) {
 	for _, kind := range []string{"empty", "nonempty", "staged-deletion"} {
 		t.Run(kind, func(t *testing.T) {

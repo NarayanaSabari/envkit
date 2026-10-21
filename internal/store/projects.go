@@ -53,9 +53,11 @@ func (s *Store) RenameProject(oldName, newName string) error {
 		}
 		// Git rejects an old path that was never audited or indexed.
 		paths := []string{next.pathspec()}
-		if tracked, err := s.trackedPath(old.pathspec()); err != nil {
+		tracked, err := s.trackedPath(old.pathspec())
+		if err != nil {
 			return err
-		} else if tracked {
+		}
+		if tracked {
 			paths = append(paths, old.pathspec())
 		}
 		if err := filepath.WalkDir(old.ProjectDir(), func(path string, entry os.DirEntry, err error) error {
@@ -70,6 +72,12 @@ func (s *Store) RenameProject(oldName, newName string) error {
 			return err
 		}
 		return s.withIndexRollback(func() error {
+			// Separate dirty content from the move so Git can follow an exact rename.
+			if tracked {
+				if err := old.commit(fmt.Sprintf("%s: snapshot before rename", oldName)); err != nil {
+					return err
+				}
+			}
 			if err := os.Rename(old.ProjectDir(), next.ProjectDir()); err != nil {
 				return err
 			}
