@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -40,11 +41,18 @@ var (
 	borderStyle   = lipgloss.RoundedBorder()
 )
 
+type keyHistory struct {
+	lines   []string
+	updated string
+	err     error
+}
+
 // Model is the state of the lazydocker-style envkit TUI.
 type Model struct {
 	Store         *store.Store
 	projects      []string
 	keys          []store.Entry
+	history       map[string]keyHistory
 	projectCursor int
 	keyCursor     int
 	focused       int
@@ -75,42 +83,46 @@ func Run(s *store.Store) error {
 }
 
 func (m *Model) refreshProjects() {
+	defer m.clampCursors()
 	projects, err := m.Store.Projects()
 	if err != nil {
 		m.status = err.Error()
 		return
 	}
 	m.projects = projects
-	for i, project := range projects {
+	for i, project := range m.filteredProjects() {
 		if project == m.Store.Project {
 			m.projectCursor = i
 			break
 		}
 	}
-	m.clampCursors()
 }
 
 func (m *Model) loadKeys() {
+	defer m.clampCursors()
+	m.keys = nil
+	m.history = make(map[string]keyHistory)
 	keys, err := m.Store.Entries()
 	if err != nil {
 		m.status = err.Error()
 		return
 	}
 	m.keys = keys
-	m.clampCursors()
+	for _, entry := range keys {
+		text, err := m.Store.KeyHistory(entry.Key, "%h  %ar  %s")
+		history := keyHistory{lines: nonEmptyLines(text), err: err}
+		if len(history.lines) > 0 {
+			_, rest, _ := strings.Cut(history.lines[0], "  ")
+			history.updated, _, _ = strings.Cut(rest, "  ")
+		}
+		m.history[entry.Key] = history
+	}
 }
 
 func (m *Model) clampCursors() {
-	if len(m.projects) == 0 {
-		m.projectCursor = 0
-	} else if m.projectCursor >= len(m.projects) {
-		m.projectCursor = len(m.projects) - 1
-	}
-	if len(m.filteredKeys()) == 0 {
-		m.keyCursor = 0
-	} else if m.keyCursor >= len(m.filteredKeys()) {
-		m.keyCursor = len(m.filteredKeys()) - 1
-	}
+	m.reveal = false
+	m.projectCursor = max(0, min(m.projectCursor, len(m.filteredProjects())-1))
+	m.keyCursor = max(0, min(m.keyCursor, len(m.filteredKeys())-1))
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -130,17 +142,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
-	case "tab":
+	case "tab", "shift+tab":
 		m.focused = (m.focused + 1) % 2
-	case "shift+tab":
-		m.focused = (m.focused + 1) % 2
+		m.clampCursors()
 	case "j", "down":
 		m.move(1)
 	case "k", "up":
 		m.move(-1)
 	case "enter":
-		if m.focused == paneProjects && len(m.filteredProjects()) > 0 {
-			m.Store = store.NewForProject(m.Store.Home, m.filteredProjects()[m.projectCursor])
+		projects := m.filteredProjects()
+		if m.focused == paneProjects && m.projectCursor >= 0 && m.projectCursor < len(projects) {
+			m.Store = store.NewForProject(m.Store.Home, projects[m.projectCursor])
 			m.filter = ""
 			m.keyCursor = 0
 			m.loadKeys()
@@ -478,8 +490,7 @@ func (m Model) keyTable(width, height int) string {
 	keyWidth := lipgloss.Width("KEY")
 	updatedWidth := lipgloss.Width("UPDATED")
 	for i, entry := range entries {
-		changed, _ := m.Store.KeyHistory(entry.Key, "%ar")
-		updated[i] = strings.TrimSpace(strings.Split(changed, "\n")[0])
+		updated[i] = m.history[entry.Key].updated
 		keyWidth = max(keyWidth, lipgloss.Width(entry.Key))
 		updatedWidth = max(updatedWidth, lipgloss.Width(updated[i]))
 	}
@@ -559,7 +570,7 @@ func (m Model) detail(width, height int) string {
 	if !ok {
 		return muted("select a key to inspect its comment and history")
 	}
-	history, err := m.Store.KeyHistory(entry.Key, "%h  %ar  %s")
+	history, err := m.selectedKeyHistory()
 	comment := entry.Comment
 	if comment == "" {
 		comment = muted("no comment")
@@ -577,7 +588,7 @@ func (m Model) detail(width, height int) string {
 	if err != nil {
 		lines = append(lines, muted(err.Error()))
 	} else {
-		for _, line := range strings.Split(strings.TrimSpace(history), "\n") {
+		for _, line := range history {
 			if line == "" || len(lines) >= height {
 				continue
 			}
@@ -595,11 +606,8 @@ func (m Model) selectedKeyHistory() ([]string, error) {
 	if !ok {
 		return nil, nil
 	}
-	history, err := m.Store.KeyHistory(entry.Key, "%h  %ar  %s")
-	if err != nil {
-		return nil, err
-	}
-	return nonEmptyLines(history), nil
+	history := m.history[entry.Key]
+	return history.lines, history.err
 }
 
 func (m Model) historyLine(line string, width int) string {
@@ -659,20 +667,5 @@ func wrap(text string, width int) []string {
 	if width < 1 {
 		return []string{""}
 	}
-	var lines []string
-	for _, line := range strings.Split(text, "\n") {
-		for lipgloss.Width(line) > width {
-			var part strings.Builder
-			for _, r := range line {
-				if lipgloss.Width(part.String()+string(r)) > width {
-					break
-				}
-				part.WriteRune(r)
-			}
-			lines = append(lines, part.String())
-			line = strings.TrimPrefix(line, part.String())
-		}
-		lines = append(lines, line)
-	}
-	return lines
+	return strings.Split(ansi.Hardwrap(text, width, true), "\n")
 }

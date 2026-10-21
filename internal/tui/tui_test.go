@@ -3,6 +3,10 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +17,17 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+func newTestStore(t *testing.T, home, project string) *store.Store {
+	t.Helper()
+	t.Setenv("GIT_AUTHOR_NAME", "envkit test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "envkit-test@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "envkit test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "envkit-test@example.com")
+	return store.NewForProject(home, project)
+}
+
 func TestModelRendersAndMovesCursor(t *testing.T) {
-	s := store.NewForProject(t.TempDir(), "project")
+	s := newTestStore(t, t.TempDir(), "project")
 	if err := s.Ensure(); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +50,7 @@ func TestModelRendersAndMovesCursor(t *testing.T) {
 }
 
 func TestViewFitsTerminalAndUsesLazyGitStylePanes(t *testing.T) {
-	s := store.NewForProject(t.TempDir(), "narayana__envkit")
+	s := newTestStore(t, t.TempDir(), "narayana__envkit")
 	for _, entry := range []struct {
 		key, value, comment string
 	}{
@@ -122,7 +135,7 @@ func TestViewFitsTerminalAndUsesLazyGitStylePanes(t *testing.T) {
 }
 
 func TestKeyTableKeepsKeysAndUpdatedTimesIntact(t *testing.T) {
-	s := store.NewForProject(t.TempDir(), "project")
+	s := newTestStore(t, t.TempDir(), "project")
 	entries := []struct {
 		key, value, comment string
 		when                time.Time
@@ -187,7 +200,7 @@ func TestKeyTableKeepsKeysAndUpdatedTimesIntact(t *testing.T) {
 }
 
 func TestRevealExpandsValueColumnAndShowsDetailValue(t *testing.T) {
-	s := store.NewForProject(t.TempDir(), "project")
+	s := newTestStore(t, t.TempDir(), "project")
 	comment := "Selected secret comment"
 	const value = "velvet_fb_1234567890abcdef"
 	if err := s.Set("VELVET_TOKEN", value, &comment); err != nil {
@@ -245,7 +258,7 @@ func TestRevealExpandsValueColumnAndShowsDetailValue(t *testing.T) {
 }
 
 func TestHeaderRuleContainsVisibleCharacters(t *testing.T) {
-	s := store.NewForProject(t.TempDir(), "project")
+	s := newTestStore(t, t.TempDir(), "project")
 	if err := s.Set("TOKEN", "secret", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +281,251 @@ func TestHeaderRuleContainsVisibleCharacters(t *testing.T) {
 			}
 			if headerIndex == -1 || headerIndex+1 >= len(lines) || !strings.Contains(lines[headerIndex+1], "─") {
 				t.Fatalf("table header rule line does not contain visible characters\n%s", view)
+			}
+		})
+	}
+}
+
+func press(model Model, key tea.KeyMsg) Model {
+	updated, _ := model.Update(key)
+	return updated.(Model)
+}
+
+func applyFilter(model Model, value string) Model {
+	model = press(model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	model.input.SetValue(value)
+	return press(model, tea.KeyMsg{Type: tea.KeyEnter})
+}
+
+func TestProjectFilterClampsCursorBeforeLoading(t *testing.T) {
+	home := t.TempDir()
+	for _, project := range []string{"alpha", "beta", "gamma"} {
+		if err := newTestStore(t, home, project).Ensure(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	model := New(newTestStore(t, home, "gamma"))
+	if model.projectCursor != 2 {
+		t.Fatalf("project cursor = %d, want 2", model.projectCursor)
+	}
+	model = applyFilter(model, "alpha")
+	if model.projectCursor != 0 {
+		t.Fatalf("filtered project cursor = %d, want 0", model.projectCursor)
+	}
+	model = press(model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.Store.Project != "alpha" {
+		t.Fatalf("loaded project = %q, want alpha", model.Store.Project)
+	}
+	for _, cursor := range []int{-1, 3} {
+		model.projectCursor = cursor
+		model = press(model, tea.KeyMsg{Type: tea.KeyEnter})
+		if model.Store.Project != "alpha" {
+			t.Fatalf("invalid cursor loaded project %q", model.Store.Project)
+		}
+	}
+}
+
+func TestClampCursorsUsesFocusedFilteredLists(t *testing.T) {
+	for _, focused := range []int{paneProjects, paneKeys} {
+		for _, cursor := range []int{-1, 2} {
+			model := Model{
+				projects: []string{"alpha", "beta", "gamma"},
+				keys:     []store.Entry{{Key: "ALPHA"}, {Key: "BETA"}, {Key: "GAMMA"}},
+				focused:  focused, filter: "alpha", projectCursor: cursor, keyCursor: cursor,
+			}
+			model.clampCursors()
+			wantProject, wantKey := max(0, cursor), max(0, cursor)
+			if focused == paneProjects {
+				wantProject = 0
+			} else {
+				wantKey = 0
+			}
+			if model.projectCursor != wantProject || model.keyCursor != wantKey {
+				t.Fatalf("focused %d cursors = %d/%d, want %d/%d", focused, model.projectCursor, model.keyCursor, wantProject, wantKey)
+			}
+			model = press(model, tea.KeyMsg{Type: tea.KeyTab})
+			if model.projectCursor != 0 || model.keyCursor != 0 {
+				t.Fatalf("focus change left cursors = %d/%d", model.projectCursor, model.keyCursor)
+			}
+			model.mode = promptFilter
+			model.completePrompt("absent")
+			if model.projectCursor != 0 || model.keyCursor != 0 {
+				t.Fatalf("empty filter left cursors = %d/%d", model.projectCursor, model.keyCursor)
+			}
+		}
+	}
+}
+
+func TestRevealResetsOnSelectionChanges(t *testing.T) {
+	home := t.TempDir()
+	s := newTestStore(t, home, "alpha")
+	for _, entry := range []store.Entry{{Key: "A", Value: "first-secret"}, {Key: "B", Value: "second-secret"}} {
+		if err := s.Set(entry.Key, entry.Value, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := newTestStore(t, home, "beta")
+	if err := other.Set("B", "other-project-secret", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"filter", "focus", "project", "load", "refresh", "projects"} {
+		t.Run(action, func(t *testing.T) {
+			model := New(s)
+			model.focused = paneKeys
+			model = applyFilter(model, "A")
+			model = press(model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
+			if !model.reveal || !strings.Contains(model.View(), "first-secret") {
+				t.Fatal("selected A was not revealed")
+			}
+			switch action {
+			case "filter":
+				model = applyFilter(model, "B")
+				if entry, ok := model.selectedKey(); !ok || entry.Key != "B" {
+					t.Fatalf("selected key after filtering = %+v, %v", entry, ok)
+				}
+			case "focus":
+				model = press(model, tea.KeyMsg{Type: tea.KeyShiftTab})
+			case "project":
+				model.focused = paneProjects
+				model.filter = ""
+				model.projectCursor = 1
+				model = press(model, tea.KeyMsg{Type: tea.KeyEnter})
+				if model.Store.Project != "beta" {
+					t.Fatalf("loaded project = %q, want beta", model.Store.Project)
+				}
+			case "load":
+				model.loadKeys()
+			case "refresh":
+				model = press(model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+			case "projects":
+				model.refreshProjects()
+			}
+			if model.reveal {
+				t.Fatal("selection change preserved reveal")
+			}
+			view := model.View()
+			for _, secret := range []string{"first-secret", "second-secret", "other-project-secret"} {
+				if strings.Contains(view, secret) {
+					t.Fatalf("selection change exposed %q", secret)
+				}
+			}
+		})
+	}
+}
+
+func TestViewAndNavigationUseCachedHistoryWithoutGitOrWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Git recorder uses a POSIX shell")
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	calls := filepath.Join(bin, "calls")
+	t.Setenv("ENVKIT_TEST_GIT", realGit)
+	t.Setenv("ENVKIT_TEST_GIT_CALLS", calls)
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ENVKIT_TEST_GIT_CALLS\"\nexec \"$ENVKIT_TEST_GIT\" \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	s := newTestStore(t, t.TempDir(), "project")
+	if err := s.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	var contents strings.Builder
+	for i := 0; i < 100; i++ {
+		fmt.Fprintf(&contents, "KEY_%03d=secret\n", i)
+	}
+	if err := os.WriteFile(s.Path(), []byte(contents.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Commit("project: initial keys"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(calls, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := New(s)
+	loadedCalls, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(loadedCalls), "log --format="); got != 100 {
+		t.Fatalf("history calls during load = %d, want 100", got)
+	}
+	if err := os.RemoveAll(s.ProjectDir()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		view := model.View()
+		if !strings.Contains(view, "initial keys") {
+			t.Fatalf("cached history missing from detail\n%s", view)
+		}
+		model = press(model, tea.KeyMsg{Type: tea.KeyTab})
+		model = press(model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		model = applyFilter(model, "KEY_00")
+	}
+	afterCalls, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterCalls) != string(loadedCalls) {
+		t.Fatalf("render or navigation invoked Git:\n%s", afterCalls[len(loadedCalls):])
+	}
+	if _, err := os.Stat(s.ProjectDir()); !os.IsNotExist(err) {
+		t.Fatalf("render or navigation recreated project directory: %v", err)
+	}
+}
+
+func TestHistoryCacheReloadsOnRefreshAndMutation(t *testing.T) {
+	s := newTestStore(t, t.TempDir(), "project")
+	if err := s.Set("TOKEN", "secret", nil); err != nil {
+		t.Fatal(err)
+	}
+	model := New(s)
+	initial, err := model.selectedKeyHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// KeyHistory uses Git -S, so change the key's occurrence count.
+	if err := s.Set("TOKEN", "secret TOKEN", nil); err != nil {
+		t.Fatal(err)
+	}
+	cached, _ := model.selectedKeyHistory()
+	if !reflect.DeepEqual(cached, initial) {
+		t.Fatal("history changed without reload")
+	}
+	model = press(model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	refreshed, err := model.selectedKeyHistory()
+	if err != nil || len(refreshed) != len(initial)+1 {
+		t.Fatalf("refreshed history = %v, %v", refreshed, err)
+	}
+	model.pendingKey = "TOKEN"
+	model.mode = promptEditValue
+	model.completePrompt("updated-secret TOKEN TOKEN")
+	mutated, err := model.selectedKeyHistory()
+	if err != nil || len(mutated) != len(refreshed)+1 {
+		t.Fatalf("history after edit = %v, %v", mutated, err)
+	}
+}
+
+func TestWrapHandlesUnicodeAndNarrowWidths(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		width      int
+		want       []string
+	}{
+		{"wide rune in one cell", "界", 1, []string{"", "界"}},
+		{"wide runes", "界界", 2, []string{"界", "界"}},
+		{"combining marks", "e\u0301e\u0301", 1, []string{"e\u0301", "e\u0301"}},
+		{"ansi", "\x1b[31m界a\x1b[0m", 2, []string{"\x1b[31m界", "a\x1b[0m"}},
+		{"spaces and newlines", "a b\nc", 2, []string{"a ", "b", "c"}},
+		{"zero width", "界", 0, []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wrap(tc.text, tc.width); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("wrap(%q, %d) = %q, want %q", tc.text, tc.width, got, tc.want)
 			}
 		})
 	}
