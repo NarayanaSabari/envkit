@@ -529,8 +529,11 @@ func (m Model) keyBar(width int) string {
 	}
 	items := []struct{ key, label string }{
 		{"tab", "panes"}, {"j/k", "move"}, {"enter", "load"}, {"a", "add"},
-		{"e", editLabel}, {"n", "rename"}, {"c", "comment"}, {"d", "delete"}, {"v", "reveal"},
+		{"e", editLabel}, {"n", "rename key"}, {"c", "comment"}, {"d", "delete"}, {"v", "reveal"},
 		{"/", "filter"}, {"r", "refresh"}, {"q", "quit"},
+	}
+	if m.focused == paneProjects {
+		items = append(items[:5], items[6:]...)
 	}
 	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)
 	labelStyle := lipgloss.NewStyle().Foreground(commentColor)
