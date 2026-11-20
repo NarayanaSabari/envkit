@@ -502,6 +502,28 @@ func (s *Store) Comment(key, text string) error {
 	})
 }
 
+// Rename changes a key's name in place, keeping its value and comments.
+func (s *Store) Rename(oldKey, newKey string) error {
+	if err := ValidateKey(oldKey); err != nil {
+		return err
+	}
+	if err := ValidateKey(newKey); err != nil {
+		return err
+	}
+	return s.update(fmt.Sprintf("%s: rename %s to %s", s.Project, oldKey, newKey), func(d *Document) error {
+		if _, ok := d.Value(newKey); ok && newKey != oldKey {
+			return fmt.Errorf("envkit: key already exists: %s", newKey)
+		}
+		for i, line := range d.Lines {
+			if found, ok := keyAt(line); ok && found == oldKey {
+				d.Lines[i] = newKey + strings.TrimPrefix(line, oldKey)
+				return nil
+			}
+		}
+		return fmt.Errorf("envkit: no such key: %s", oldKey)
+	})
+}
+
 func (s *Store) Unset(key string) error {
 	if err := ValidateKey(key); err != nil {
 		return err

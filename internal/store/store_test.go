@@ -93,3 +93,24 @@ func configureGit(t *testing.T, home string) {
 		}
 	}
 }
+
+func TestRenameKeepsValueAndComment(t *testing.T) {
+	s := NewForProject(t.TempDir(), "project")
+	comment := "note"
+	if err := s.Set("OLD", "v", &comment); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set("TAKEN", "x", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rename("OLD", "TAKEN"); err == nil {
+		t.Fatal("rename onto existing key allowed")
+	}
+	if err := s.Rename("OLD", "NEW"); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := s.Read()
+	if got, want := string(doc.Bytes()), "# note\nNEW=v\nTAKEN=x\n"; got != want {
+		t.Fatalf("Rename = %q, want %q", got, want)
+	}
+}

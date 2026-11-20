@@ -27,6 +27,7 @@ const (
 	promptAddComment
 	promptEditValue
 	promptEditComment
+	promptRenameKey
 	promptFilter
 	promptConfirmDelete
 	promptRenameProject
@@ -192,6 +193,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingKey = entry.Key
 			m.startPrompt(promptEditValue, "new value", true)
 		}
+	case "n":
+		if m.focused == paneProjects {
+			break
+		}
+		if entry, ok := m.selectedKey(); ok {
+			m.pendingKey = entry.Key
+			m.startPrompt(promptRenameKey, "new key name")
+			m.input.SetValue(entry.Key)
+		}
 	case "c":
 		if entry, ok := m.selectedKey(); ok {
 			m.pendingKey = entry.Key
@@ -311,6 +321,13 @@ func (m *Model) completePrompt(value string) {
 			m.status = "updated " + m.pendingKey
 			m.loadKeys()
 		}
+	case promptRenameKey:
+		if err := m.Store.Rename(m.pendingKey, value); err != nil {
+			m.status = err.Error()
+		} else {
+			m.status = "renamed " + m.pendingKey + " to " + value
+			m.loadKeys()
+		}
 	case promptEditComment:
 		if err := m.Store.Comment(m.pendingKey, value); err != nil {
 			m.status = err.Error()
@@ -372,6 +389,8 @@ func promptLabel(mode promptMode, key, placeholder string) string {
 		return "Value for " + key + ": "
 	case promptEditComment:
 		return "Comment for " + key + ": "
+	case promptRenameKey:
+		return "Rename " + key + " to: "
 	case promptRenameProject:
 		return "Rename " + key + " to: "
 	case promptFilter:
@@ -510,7 +529,7 @@ func (m Model) keyBar(width int) string {
 	}
 	items := []struct{ key, label string }{
 		{"tab", "panes"}, {"j/k", "move"}, {"enter", "load"}, {"a", "add"},
-		{"e", editLabel}, {"c", "comment"}, {"d", "delete"}, {"v", "reveal"},
+		{"e", editLabel}, {"n", "rename"}, {"c", "comment"}, {"d", "delete"}, {"v", "reveal"},
 		{"/", "filter"}, {"r", "refresh"}, {"q", "quit"},
 	}
 	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(accentColor)

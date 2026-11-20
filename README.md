@@ -152,6 +152,7 @@ Every mutation uses the same local Git audit log as the CLI.
 | `enter` | Load the selected project. |
 | `a` | Add a key, hidden value, and optional comment. |
 | `e` | Projects pane: rename the highlighted project. Keys pane: edit the selected value with a hidden input. |
+| `n` | Keys pane: rename the selected key, keeping its value and comment. |
 | `c` | Edit the selected comment. |
 | `d`, then `y` / `n` | Projects pane: delete the highlighted project and all its keys. Keys pane: delete the selected key. Both require confirmation. |
 | `v` | Reveal or mask the selected value. |
