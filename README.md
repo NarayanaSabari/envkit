@@ -173,6 +173,15 @@ Past secret values remain recoverable in the local Git audit history, so deletio
 Unsaved file changes are snapshotted before renaming or deleting; a failed operation may still leave that audit snapshot.
 Projects with unexpected files, including recovery edits, must be cleaned up explicitly before deletion.
 
+## As a Go package
+
+Other Go programs can use the vault through `github.com/NarayanaSabari/envkit/vault`.
+It has three calls, all on envkit's own store, lock, file modes and history:
+
+- `vault.Open(home, project)` opens one project. An empty home means `ENVKIT_HOME`, or `~/.envkit`.
+- `v.Get(key)` returns the value and whether the key is set.
+- `v.Set(key, value, comment)` writes the key with its comment and commits the change. Its errors never hold the value.
+
 ## Compared to
 
 | Tool | Comments | Audit log | Worktree-aware | Offline | TUI |
